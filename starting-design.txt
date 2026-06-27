@@ -1,0 +1,37 @@
+This is the starting design document for htmlslats, a simple site builder that strings together "slats" of HTML.
+
+I've always thought that it should be easier to reuse "snippets" of HTML.  That once you made the header, you should put on some content in the middle, and tack on your footer on the end, and that's a page.  Why can't I pre-make header.html, footer.html, etc. and just call them when I need them?
+
+This is where htmlslats comes in.  Each page is it's own HTML page, just like normal, but there is a "slats" folder where you can place re-usable html snippets.  Then when you're building your page you just "hang" your "slats" one by one, putting content where you need it.
+
+When the site goes through it's build step, it simply replaces any slats with their contents.  There is also a vars folder that can contain csv or txt files that will replace variables with their contents in the build step.
+
+The syntax is simple: in your html page put the name of a slat inbetween double square brackets (ex. [[header.html]]).  
+
+Variables are denoted with double squigly brackets, and the syntax is: {{file//value of first line//number of value to use}}.  The number of value references the column number, starting at 0.  So, for example, if you has the csv file vars.csv with the following contents:
+
+Name,Date,Price
+Bread,20260101,$3.99
+Milk,Sept 13,$5.00
+
+And you used the following command:
+{{vars.csv//Milk//2}} 
+it would return $5.00
+
+It should also support coordinate lookup, using the syntax {{file//[x,y]}}, where the first value is [0,0]. 
+
+So if we use the same example contents and used the command:
+{{vars.csv//[1,1]}}
+it would return 20260101
+
+If you want to escape either of the above commands, you can make as section as large as you need that ignores commands by placing any content within []IGNORE[] []/IGNORE[].  If for some reason you want to type that, either of those can be ignored by immediately preceeding them with a slash (ex. /[]IGNORE[] would literally print "[]IGNORE[]")
+
+This should be buildable when deploying on cloudflare pages.
+
+Default folders should be: slats, vars, and src (which contains the regular website folders such as img, css, etc)
+
+Home page is index.html, other pages are other html files.  By default these should be all the folders needed, but other folders should not break anything.
+
+I would like the snippets to be able to be js as well if possible, as long as that doesn't break anything.
+
+There should also be instructions to make it easy for AI / agents to use this system.

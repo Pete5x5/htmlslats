@@ -1,3 +1,4 @@
 dist/
 node_modules/
 starting-design.txt
+.DS_Store

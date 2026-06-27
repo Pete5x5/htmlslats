@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/hslogo.png" alt="htmlslats logo: a hanging wooden slat sign" width="420">
+</p>
+
 # htmlslats
 
 htmlslats is a tiny static site builder for composing normal HTML pages from reusable snippets called slats.

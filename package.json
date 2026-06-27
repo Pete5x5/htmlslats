@@ -1,0 +1,24 @@
+{
+  "name": "htmlslats",
+  "version": "0.1.0",
+  "description": "A simple static site builder that strings together reusable HTML slats.",
+  "type": "module",
+  "bin": {
+    "htmlslats": "./scripts/htmlslats.js"
+  },
+  "scripts": {
+    "build": "node scripts/htmlslats.js build",
+    "clean": "node scripts/htmlslats.js clean",
+    "dev": "node scripts/htmlslats.js build --watch",
+    "test": "node tests/htmlslats.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "static-site",
+    "html",
+    "ssg"
+  ],
+  "license": "MIT"
+}

@@ -13,12 +13,13 @@ Use this project as a plain static site. Do not add a frontend framework unless 
 ## Syntax
 
 - Slat include: `[[header.html]]`
+- Slat include with scoped variables: `[[product.html//x="s30"]]`, then use `$$x` inside the slat.
 - CSV row lookup: `{{site.csv//Tagline//1}}`
 - Coordinate lookup: `{{site.csv//[1,2]}}`
 - Ignored block: `[]IGNORE[] {{this stays literal}} []/IGNORE[]`
 - Literal ignore marker: `/[]IGNORE[]`
 
-Slats can include more slats and variables. Slats may be `.html`, `.js`, or any text file if the containing page needs that text inserted.
+Slats can include more slats and variables. Slats may be `.html`, `.js`, or any text file if the containing page needs that text inserted. Scoped variables passed with `//name="value"` apply only while that slat and its nested slats render, so the same slat can be reused with different `$$name` values.
 
 ## Commands
 

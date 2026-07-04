@@ -16,12 +16,16 @@ try {
 <main>
   <p>{{site.csv//Milk//2}}</p>
   <p>{{site.csv//[1,2]}}</p>
+  [[product.html//x="s30"//label='Small']]
+  [[product.html//x="m45"//label="Medium"]]
   []IGNORE[]{{site.csv//Milk//2}} [[header.html]][]/IGNORE[]
   <p>/[]IGNORE[]</p>
 </main>`);
   await write("nested/page.html", `[[nested.html]]`);
   await write("slats/header.html", `<header>[[nav.html]] {{site.csv//Name//1}}</header>`);
   await write("slats/nav.html", `<nav>Nav</nav>`);
+  await write("slats/product.html", `<section class="product-$$x"><h2>$$label</h2>[[product-code.html]]</section>`);
+  await write("slats/product-code.html", `<span>$$x</span>`);
   await write("slats/nested.html", `<script src="/js/app.js"></script>`);
   await write("vars/site.csv", `Key,Value,Price
 Name,htmlslats,
@@ -42,6 +46,8 @@ Quoted,"A ""quoted"" value",`);
   assert.match(index, /<header><nav>Nav<\/nav> htmlslats<\/header>/);
   assert.match(index, /<p>\$5\.00<\/p>/);
   assert.match(index, /<p>20260101<\/p>/);
+  assert.match(index, /<section class="product-s30"><h2>Small<\/h2><span>s30<\/span><\/section>/);
+  assert.match(index, /<section class="product-m45"><h2>Medium<\/h2><span>m45<\/span><\/section>/);
   assert.match(index, /\{\{site\.csv\/\/Milk\/\/2\}\} \[\[header\.html\]\]/);
   assert.match(index, /<p>\[\]IGNORE\[\]<\/p>/);
 

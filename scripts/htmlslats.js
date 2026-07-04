@@ -53,6 +53,7 @@ async function main() {
 async function build() {
   const context = {
     slatStack: [],
+    scopedVarsStack: [],
     varsCache: new Map()
   };
 
@@ -143,7 +144,8 @@ async function findHtmlPages(directory) {
 async function render(input, context, sourcePath) {
   const { text, ignored } = extractIgnoredSections(input);
   const withSlats = await replaceSlats(text, context, sourcePath);
-  const withVars = await replaceVars(withSlats, context, sourcePath);
+  const withScopedVars = replaceScopedVars(withSlats, context);
+  const withVars = await replaceVars(withScopedVars, context, sourcePath);
   return restoreIgnoredSections(withVars, ignored);
 }
 
@@ -221,7 +223,8 @@ async function replaceSlats(input, context, sourcePath) {
 
   for (const match of input.matchAll(tokenPattern)) {
     output += input.slice(cursor, match.index);
-    output += await loadSlat(match[1].trim(), context, sourcePath);
+    const reference = parseSlatReference(match[1].trim(), sourcePath);
+    output += await loadSlat(reference, context, sourcePath);
     cursor = match.index + match[0].length;
   }
 
@@ -229,7 +232,30 @@ async function replaceSlats(input, context, sourcePath) {
   return output;
 }
 
-async function loadSlat(slatName, context, sourcePath) {
+function parseSlatReference(expression, sourcePath) {
+  const [slatName, ...assignmentExpressions] = expression.split("//").map((part) => part.trim());
+  const scopedVars = new Map();
+
+  for (const assignmentExpression of assignmentExpressions) {
+    const assignment = assignmentExpression.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s]+))$/);
+
+    if (!assignment) {
+      throw new Error(`htmlslats: invalid scoped variable assignment "${assignmentExpression}" in ${path.relative(ROOT, sourcePath)}`);
+    }
+
+    const [, name, doubleQuoted, singleQuoted, bare] = assignment;
+    scopedVars.set(name, unescapeScopedVarValue(doubleQuoted ?? singleQuoted ?? bare));
+  }
+
+  return { slatName, scopedVars };
+}
+
+function unescapeScopedVarValue(value) {
+  return value.replaceAll("\\\"", "\"").replaceAll("\\'", "'").replaceAll("\\\\", "\\");
+}
+
+async function loadSlat(reference, context, sourcePath) {
+  const { slatName, scopedVars } = reference;
   assertSafeRelativePath(slatName, "slat");
   const slatPath = path.join(ROOT, SLATS_DIR, slatName);
 
@@ -245,10 +271,31 @@ async function loadSlat(slatName, context, sourcePath) {
   }
 
   context.slatStack.push(slatPath);
+  context.scopedVarsStack.push(scopedVars);
   const source = await fs.readFile(slatPath, "utf8");
-  const rendered = await render(source, context, slatPath);
-  context.slatStack.pop();
-  return rendered;
+  try {
+    return await render(source, context, slatPath);
+  } finally {
+    context.scopedVarsStack.pop();
+    context.slatStack.pop();
+  }
+}
+
+function replaceScopedVars(input, context) {
+  if (context.scopedVarsStack.length === 0) return input;
+
+  const scopedVars = new Map();
+  for (const frame of context.scopedVarsStack) {
+    for (const [name, value] of frame) {
+      scopedVars.set(name, value);
+    }
+  }
+
+  if (scopedVars.size === 0) return input;
+
+  return input.replace(/\$\$([A-Za-z_][A-Za-z0-9_-]*)/g, (token, name) => {
+    return scopedVars.has(name) ? scopedVars.get(name) : token;
+  });
 }
 
 async function replaceVars(input, context, sourcePath) {

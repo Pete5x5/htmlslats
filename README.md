@@ -40,6 +40,25 @@ Use double square brackets to insert a slat:
 
 This loads `slats/header.html` and replaces the token with that file's contents. Slats can include other slats and can use variables. A slat can be any text file, including `.html` or `.js`, as long as inserting that text makes sense where you use it.
 
+Pass scoped variables to a slat by adding `//name="value"` after the slat path:
+
+```html
+[[product.html//x="s30"]]
+```
+
+Inside `slats/product.html`, every `$$x` token is replaced with `s30` while that slat renders. Scoped variables only apply to the referenced slat and any slats it includes, so the same slat can be reused with different values:
+
+```html
+[[product.html//x="s30"]]
+[[product.html//x="m45"]]
+```
+
+Multiple scoped variables are supported:
+
+```html
+[[product.html//x="s30"//label="Small product"]]
+```
+
 ## Variables
 
 Use double curly braces to insert values from `vars/`.

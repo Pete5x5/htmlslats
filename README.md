@@ -22,6 +22,7 @@ Open `dist/index.html` after building, or deploy `dist/` as a static site.
 .
 ├── index.html          # home page
 ├── about.html          # another page
+├── docs/               # nested pages and loop content
 ├── slats/              # reusable snippets
 ├── vars/               # csv and txt values
 ├── src/                # static assets copied as-is
@@ -59,7 +60,7 @@ Multiple scoped variables are supported:
 [[product.html//x="s30"//label="Small product"]]
 ```
 
-## Variables
+## Global Variables
 
 Use double curly braces to insert values from `vars/`.
 
@@ -87,6 +88,182 @@ Tagline,Reusable HTML slats for simple static sites.
 
 `.txt` files are treated as one-column rows, one row per line.
 
+## Local Variables
+
+Declare a variable anywhere in a page or slat with `||name=value||`, then reference it with `$$name`:
+
+```html
+||x=123||
+<p>$$x</p>
+||x="hello world"||
+<p>$$x</p>
+```
+
+Declarations produce no output. Commands run in source order: the first paragraph receives `123`, and the second receives `hello world`. Values are strings, not JavaScript or Python expressions. Use bare values or single/double quotes; quoted values support escaped quotes and backslashes. Names start with a letter or underscore and can contain letters, digits, underscores, and hyphens.
+
+A declaration can copy an existing variable, a global lookup, or an extracted local variable:
+
+```html
+||heading={{site.csv//Tagline//1}}||
+||copy=$$heading||
+||label=[[$$title in card.html]]||
+```
+
+Local declarations can redefine inherited or scoped variables. The new value applies to the current file and the slats it subsequently includes. It does not change the caller's value. Each loop iteration has its own scope, so assignments in one iteration do not carry over to the next or escape the loop. An undefined ordinary `$$name` remains literal, as with scoped variables.
+
+### Extract a Local Variable
+
+Read a local variable from a slat without inserting its content:
+
+```html
+[[$$title in card.html]]
+```
+
+For this `slats/card.html`:
+
+```html
+||title="Hello"||
+<article>This content is only inserted with [[card.html]].</article>
+```
+
+The extraction returns `Hello`. Only direct declarations in the target file count; a variable inherited from the caller, passed as a scoped variable, declared in a loop, or declared in an included slat does not count. Ignored declarations do not count either. All direct declarations are evaluated in order, and the last declaration of the requested variable wins. Includes and loops in the target are skipped.
+
+Declaration values may copy other variable values, including extractions, but cannot insert whole slats or run loops. Missing local variables and circular extractions produce errors identifying the variable and source file.
+
+## Loops
+
+Wrap a loop in `%% ... %%`. Start its header with `>for` and its body with `>>`:
+
+```html
+%%>for number x in range(0,3)
+>> <span>$$x</span>
+%%
+```
+
+The leading `>` before `for` is optional. Inline syntax and `{{ ... }}` wrappers are also supported:
+
+```html
+%%for number x in range(0,3)>><span>$$x</span>%%
+{{>for number x in range(0,3)>><span>$$x</span>}}
+```
+
+Use a matching pair of wrappers. These forms perform the same loop; whitespace in the body is preserved, so formatting can add whitespace to the output. A loop variable is available in body text, include paths, scoped assignments, and nested loop headers.
+
+### Loop Through Files
+
+```html
+%%>for file x of type(.md) in folder(/docs)
+>> <section data-file="$$x">[[$$x]]</section>
+%%
+```
+
+- `type(.md)` filters by extension, including the leading dot. Matching is case sensitive. Omit `of type(...)` to use all file types.
+- `folder(/docs)` selects `docs/` under the project root. Paths with or without a leading slash are relative to the project root. Omit `in folder(...)` to use the directory of the file containing the loop. In a slat, that means the slat's directory.
+- Loops visit immediate files only, in filename order; subdirectories and symlinks are skipped. Empty folders produce no output.
+- `$$x` is the full filename with its extension, such as `intro.md`, without a folder prefix. `[[$$x]]` inserts the selected file from the loop folder. Other ordinary include paths still resolve inside `slats/`. A root-relative include such as `[[/docs/intro.md]]` explicitly selects a project file.
+- The current file and any files already being rendered in its include chain are excluded. An explicit circular include still produces an error.
+- File and folder paths cannot leave the project, including through symlinks.
+
+To assemble a docs page, create `docs/index.html`:
+
+```html
+[[header.html]]
+<main>[[docs-content.html//x="/docs"]]</main>
+[[footer.html]]
+```
+
+Then create `slats/docs-content.html`:
+
+```html
+%%>for file x of type(.md) in folder($$x)
+>> <section data-file="$$x">[[$$x]]</section>
+%%
+```
+
+Add content files such as `docs/intro.md` and `docs/setup.md`. The folder expression reads the scoped `$$x` before the loop uses `x` for each filename. Slat insertion preserves file text; `.md` files are **not converted to HTML**. Use HTML content if you need rendered markup, or handle Markdown separately.
+
+To apply a shared slat to every item, pass the selected filename to it:
+
+```html
+%%>for file doc of type(.html) in folder(/docs)
+>> [[doc-card.html//filename=$$doc]]
+%%
+```
+
+With `slats/doc-card.html` containing:
+
+```html
+<article>
+  <h2>$$filename</h2>
+  [[$$filename]]
+</article>
+```
+
+The selected file remains available to includes inside that slat. File loops assemble content in the current page; they do not generate a separate output page for each item.
+
+### Loop Through Numbers
+
+```html
+%%>for number x in range(0,7)
+>> [[chart-$$x.html]]
+%%
+```
+
+Or pass the number to the same slat on every iteration:
+
+```html
+%%>for number x in range(0,7)
+>> [[chart.html//y=$$x]]
+%%
+```
+
+Ranges follow Python's two-argument behavior: the start is included, the stop is excluded, and the increment is `1`. `range(0,7)` uses `0` through `6`. Negative integer bounds are allowed; a stop at or below the start produces no iterations. Steps and `end` are not supported for number loops.
+
+### Loop Through a CSV Row
+
+```html
+%%>for col x in row(3) in file(vars.csv) in range(1,5)
+>> [[chart.html//y=$$x]]
+%%
+```
+
+CSV files resolve inside `vars/`, so this reads `vars/vars.csv`. Rows and columns are zero based, like coordinate lookups. `row(3)` selects the fourth parsed row. A text lookup selects the first row whose first cell matches:
+
+```html
+%%>for col x in row(tagline) in file(vars.csv) in range(0,end)
+>> [[chart.html//y=$$x]]
+%%
+```
+
+`end` means the number of cells in the selected row; the stop is still exclusive. `range(0,end)` includes the first cell (the lookup key). Omit `in range(...)` to use all cells except that first cell:
+
+```html
+%%>for col x in row(tagline) in file(vars.csv)
+>> <p>$$x</p>
+%%
+```
+
+Empty cells are included as empty strings. Duplicate keys use the first matching row. Quote a numeric key to distinguish it from a row index: `row("123")`. Missing rows, invalid ranges, and bounds outside the selected row produce clear build errors. Column loops require a `.csv` file.
+
+### Nested Loops and Depth
+
+Each additional `>` adds a level. A loop at depth `>` repeats its `>>` body; a nested loop at `>>` repeats its `>>>` body. Return to `>>` to continue the outer body:
+
+```html
+%%>for number x in range(0,2)
+>> <section>
+>>for number y in range(0,3)
+>>> <span>$$x,$$y</span>
+>> </section>
+%%
+```
+
+This produces two sections, each with three spans. Independently wrapped loops can also appear inside a loop body. Inner variables shadow outer variables until the inner loop finishes. Depth must increase one level at a time.
+
+Inside loops, runs of two or more `>` characters are reserved for depth markers. Write literal runs as HTML entities such as `&gt;&gt;`, or wrap literal content in `[]IGNORE[] ... []/IGNORE[]`. Depth markers inside variable declarations and include commands are part of their values, not loop structure. Normal single `>` characters in HTML tags work as usual.
+
+Builds stop with an error above 32 nested loops, 10,000 total loop iterations per output page (including loops in slats), or 64 simultaneously rendered files or variable extractions. These fixed limits protect against runaway templates. All new syntax can be made literal using the existing ignore markers.
+
 ## Ignoring Commands
 
 Wrap content in ignore markers when you need slat or variable syntax to remain literal:
@@ -112,6 +289,7 @@ This outputs `[]IGNORE[]`.
 npm run build   # build into dist/
 npm run clean   # remove dist/
 npm run dev     # build and watch
+npm test        # renderer compatibility and feature tests
 ```
 
 ## Cloudflare Pages

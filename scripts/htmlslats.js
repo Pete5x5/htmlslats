@@ -54,7 +54,11 @@ async function build() {
   const context = {
     slatStack: [],
     scopedVarsStack: [],
-    varsCache: new Map()
+    varsCache: new Map(),
+    fileBindingsStack: [],
+    extractionStack: [],
+    loopDepth: 0,
+    iterations: 0
   };
 
   await clean();
@@ -114,7 +118,14 @@ async function buildHtmlPages(context) {
 
   for (const page of pages) {
     const source = await fs.readFile(page, "utf8");
-    const rendered = await render(source, context, page);
+    context.iterations = 0;
+    context.slatStack.push(await fs.realpath(page));
+    let rendered;
+    try {
+      rendered = await render(source, context, page);
+    } finally {
+      context.slatStack.pop();
+    }
     const relative = path.relative(ROOT, page);
     const target = path.join(ROOT, DIST_DIR, relative);
     await fs.mkdir(path.dirname(target), { recursive: true });
@@ -141,12 +152,302 @@ async function findHtmlPages(directory) {
   return pages.sort();
 }
 
+const MAX_LOOP_DEPTH = 32;
+const MAX_RENDER_DEPTH = 64;
+const MAX_ITERATIONS = 10000;
+const VARIABLE_NAME = "[A-Za-z_][A-Za-z0-9_-]*";
+
+function fail(message, sourcePath) {
+  throw new Error(`htmlslats: ${message} in ${path.relative(ROOT, sourcePath)}`);
+}
+
 async function render(input, context, sourcePath) {
   const { text, ignored } = extractIgnoredSections(input);
-  const withSlats = await replaceSlats(text, context, sourcePath);
-  const withScopedVars = replaceScopedVars(withSlats, context);
-  const withVars = await replaceVars(withScopedVars, context, sourcePath);
-  return restoreIgnoredSections(withVars, ignored);
+  context.scopedVarsStack.push(new Map());
+  try {
+    return restoreIgnoredSections(await renderText(text, context, sourcePath), ignored);
+  } finally {
+    context.scopedVarsStack.pop();
+  }
+}
+
+// Interpret commands in source order so declarations and loop scopes are predictable.
+async function renderText(input, context, sourcePath) {
+  let output = "";
+  let cursor = 0;
+  const tokens = /\[\[|\{\{|%%(?=\s*>*for\b)|\|\|(?=[A-Za-z_][A-Za-z0-9_-]*\s*=)/g;
+  while (cursor < input.length) {
+    tokens.lastIndex = cursor;
+    const match = tokens.exec(input);
+    if (!match) {
+      output += replaceScopedVars(input.slice(cursor), context);
+      break;
+    }
+    output += replaceScopedVars(input.slice(cursor, match.index), context);
+    const start = match.index;
+    const opener = match[0];
+    const closer = opener === "[[" ? "]]" : opener === "{{" ? "}}" : opener;
+    const isLoop = opener === "%%" || (opener === "{{" && /^\s*>*for\b/.test(input.slice(start + 2)));
+    if (isLoop) {
+      const block = readLoopBlock(input, start, opener, closer, sourcePath);
+      output += await renderLoop(block.tree, context, sourcePath);
+      cursor = block.end;
+      continue;
+    }
+    const end = input.indexOf(closer, start + 2);
+    if (end < 0) fail(`unclosed ${opener} command`, sourcePath);
+    const expression = input.slice(start + 2, end).trim();
+    if (opener === "||") {
+      await defineLocal(expression, context, sourcePath);
+    } else if (opener === "[[") {
+      const extraction = expression.match(new RegExp(`^\\$\\$(${VARIABLE_NAME})\\s+in\\s+(.+)$`));
+      if (extraction) {
+        output += await extractLocal(extraction[1], replaceScopedVars(extraction[2], context), context, sourcePath);
+      } else {
+        output += await loadSlat(parseSlatReference(expression, sourcePath, context), context, sourcePath);
+      }
+    } else {
+      output += await resolveVar(replaceScopedVars(expression, context), context, sourcePath);
+    }
+    cursor = end + 2;
+  }
+  return output;
+}
+
+async function defineLocal(expression, context, sourcePath) {
+  const assignment = expression.match(new RegExp(`^(${VARIABLE_NAME})\\s*=\\s*([\\s\\S]*)$`));
+  if (!assignment) fail(`invalid local variable declaration "${expression}"`, sourcePath);
+  const value = parseValue(assignment[2], sourcePath);
+  context.scopedVarsStack.at(-1).set(assignment[1], await evaluateValue(value, context, sourcePath));
+}
+
+function parseValue(input, sourcePath) {
+  const value = input.trim();
+  if (value.startsWith('"') || value.startsWith("'")) {
+    const quote = value[0];
+    if (value.length < 2 || value.at(-1) !== quote) fail("unclosed quoted variable value", sourcePath);
+    return unescapeScopedVarValue(value.slice(1, -1));
+  }
+  return value;
+}
+
+async function evaluateValue(value, context, sourcePath) {
+  if (/%%\s*>*for\b|\|\||\{\{\s*>*for\b/.test(value)) fail("variable values cannot contain loops or declarations", sourcePath);
+  if (/\[\[(?!\$\$[A-Za-z_][A-Za-z0-9_-]*\s+in\s)/.test(value)) {
+    fail("variable values can extract local variables but cannot insert slats", sourcePath);
+  }
+  return renderText(value, context, sourcePath);
+}
+
+function readLoopBlock(input, start, opener, closer, sourcePath) {
+  let cursor = start + 2;
+  let nesting = 1;
+  while (cursor < input.length) {
+    // Skip other command tokens, whose contents can contain depth markers.
+    if (input.startsWith("[[", cursor) || input.startsWith("||", cursor) ||
+        (input.startsWith("{{", cursor) && !/^\s*>*for\b/.test(input.slice(cursor + 2)))) {
+      const close = input.startsWith("[[", cursor) ? "]]" : input.startsWith("||", cursor) ? "||" : "}}";
+      const end = input.indexOf(close, cursor + 2);
+      if (end < 0) fail(`unclosed command in loop`, sourcePath);
+      cursor = end + 2;
+      continue;
+    }
+    if (input.startsWith(opener, cursor) && /^\s*>*for\b/.test(input.slice(cursor + 2))) {
+      nesting++;
+      if (nesting > MAX_LOOP_DEPTH) fail(`loop nesting exceeds ${MAX_LOOP_DEPTH}`, sourcePath);
+      cursor += 2;
+    } else if (input.startsWith(closer, cursor)) {
+      if (--nesting === 0) {
+        return { tree: parseLoopTree(input.slice(start + 2, cursor), sourcePath), end: cursor + 2 };
+      }
+      cursor += 2;
+    } else cursor++;
+  }
+  fail(`unclosed loop (expected ${closer})`, sourcePath);
+}
+
+// A run of > characters marks depth. Newlines are formatting, not structure.
+function parseLoopTree(input, sourcePath) {
+  const header = input.match(/^\s*(>*)for\s+([^>]+?)(?=>{2,})/);
+  if (!header) fail("loop needs a header and a body depth marker such as >>", sourcePath);
+  const depth = header[1].length || 1;
+  if (depth > MAX_LOOP_DEPTH) fail(`loop nesting exceeds ${MAX_LOOP_DEPTH}`, sourcePath);
+  const root = { header: header[2].trim(), body: [], depth };
+  const stack = [root];
+  let cursor = header[0].length;
+  while (cursor < input.length) {
+    const marker = input.slice(cursor).match(/^>{2,}/);
+    if (!marker) fail("invalid loop depth marker", sourcePath);
+    const level = marker[0].length;
+    cursor += level;
+    const segmentStart = cursor;
+    // Ignore markers inside includes, global lookups, declarations and nested blocks.
+    while (cursor < input.length) {
+      if (input.startsWith("[[", cursor) || input.startsWith("||", cursor) || input.startsWith("{{", cursor) ||
+          (input.startsWith("%%", cursor) && /^\s*>*for\b/.test(input.slice(cursor + 2)))) {
+        if ((input.startsWith("{{", cursor) || input.startsWith("%%", cursor)) && /^\s*>*for\b/.test(input.slice(cursor + 2))) {
+          const delimiter = input.slice(cursor, cursor + 2);
+          cursor = readLoopBlock(input, cursor, delimiter, delimiter === "{{" ? "}}" : "%%", sourcePath).end;
+        } else {
+          const close = input.startsWith("[[", cursor) ? "]]" : input.startsWith("||", cursor) ? "||" : "}}";
+          const end = input.indexOf(close, cursor + 2);
+          if (end < 0) fail("unclosed command in loop body", sourcePath);
+          cursor = end + 2;
+        }
+      } else if (input.startsWith(">>", cursor)) break;
+      else cursor++;
+    }
+    while (stack.length > 1 && stack.at(-1).depth >= level) stack.pop();
+    const parent = stack.at(-1);
+    if (level !== parent.depth + 1) fail(`loop depth jumps from ${parent.depth} to ${level}`, sourcePath);
+    if (level > MAX_LOOP_DEPTH + 1) fail(`loop nesting exceeds ${MAX_LOOP_DEPTH}`, sourcePath);
+    const segment = input.slice(segmentStart, cursor);
+    if (/^\s*for\s+/.test(segment)) {
+      const child = { header: segment.trim().replace(/^for\s+/, ""), body: [], depth: level };
+      parent.body.push(child);
+      stack.push(child);
+    } else parent.body.push(segment);
+  }
+  if (stack.some((loop) => !loop.body.length)) fail("loop has no body", sourcePath);
+  return root;
+}
+
+async function renderLoop(loop, context, sourcePath) {
+  if (context.loopDepth >= MAX_LOOP_DEPTH) fail(`loop nesting exceeds ${MAX_LOOP_DEPTH}`, sourcePath);
+  context.loopDepth++;
+  try {
+    const { name, values } = await loopValues(replaceScopedVars(loop.header, context), context, sourcePath);
+    let output = "";
+    for (const item of values) {
+      if (++context.iterations > MAX_ITERATIONS) fail(`loop iteration limit of ${MAX_ITERATIONS} exceeded for this page`, sourcePath);
+      context.scopedVarsStack.push(new Map([[name, item.value]]));
+      context.fileBindingsStack.push(item.file ? new Map([[item.value, item.file]]) : new Map());
+      try {
+        for (const node of loop.body) {
+          output += typeof node === "string" ? await renderText(node, context, sourcePath) : await renderLoop(node, context, sourcePath);
+        }
+      } finally {
+        context.fileBindingsStack.pop();
+        context.scopedVarsStack.pop();
+      }
+    }
+    return output;
+  } finally {
+    context.loopDepth--;
+  }
+}
+
+function parseRange(input, end, sourcePath) {
+  const match = input.match(/^\s*(-?\d+)\s*,\s*(-?\d+|end)\s*$/);
+  if (!match || (match[2] === "end" && end === undefined)) fail(`invalid range(${input})`, sourcePath);
+  const start = Number(match[1]);
+  const stop = match[2] === "end" ? end : Number(match[2]);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(stop)) fail("range bounds must be safe integers", sourcePath);
+  if (stop - start > MAX_ITERATIONS) fail(`range exceeds the loop iteration limit of ${MAX_ITERATIONS}`, sourcePath);
+  return [start, stop];
+}
+
+async function loopValues(header, context, sourcePath) {
+  const prefix = header.match(new RegExp(`^(file|number|col)\\s+(${VARIABLE_NAME})([\\s\\S]*)$`));
+  if (!prefix) fail(`invalid loop header "for ${header}"`, sourcePath);
+  const [, kind, name, rest] = prefix;
+  if (kind === "file") {
+    const match = rest.match(/^\s*(?:of\s+type\(([^()]*)\))?\s*(?:in\s+folder\(([^()]*)\))?\s*$/);
+    if (!match) fail(`invalid file loop "for ${header}"`, sourcePath);
+    const extension = match[1]?.trim();
+    if (extension && !/^\.[^/\\.\s]+$/.test(extension)) fail("file type must be an extension such as .md", sourcePath);
+    const folder = match[2] === undefined ? path.dirname(sourcePath) : await projectPath(parseValue(match[2], sourcePath), sourcePath);
+    await assertProjectPath(folder, sourcePath);
+    const entries = await fs.readdir(folder, { withFileTypes: true }).catch(() => fail(`missing loop folder "${match[2] ?? path.relative(ROOT, folder)}"`, sourcePath));
+    const realFolder = await fs.realpath(folder);
+    const values = entries.filter((entry) => entry.isFile() && (!extension || path.extname(entry.name) === extension))
+      .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+      .map((entry) => ({ value: entry.name, file: path.join(realFolder, entry.name) }))
+      .filter((item) => !context.slatStack.includes(item.file));
+    return { name, values };
+  }
+  if (kind === "number") {
+    const match = rest.match(/^\s+in\s+range\(([^()]*)\)\s*$/);
+    if (!match) fail(`invalid number loop "for ${header}"`, sourcePath);
+    const [start, stop] = parseRange(match[1], undefined, sourcePath);
+    return { name, values: Array.from({ length: Math.max(0, stop - start) }, (_, i) => ({ value: String(start + i) })) };
+  }
+  const match = rest.match(/^\s+in\s+row\(([^()]*)\)\s+in\s+file\(([^()]*)\)(?:\s+in\s+range\(([^()]*)\))?\s*$/);
+  if (!match) fail(`invalid CSV loop "for ${header}"`, sourcePath);
+  const file = parseValue(match[2], sourcePath);
+  assertSafeRelativePath(file, "vars file");
+  if (path.extname(file).toLowerCase() !== ".csv") fail("column loops require a .csv vars file", sourcePath);
+  const table = await loadVars(file, context);
+  const lookup = match[1].trim();
+  const row = /^\d+$/.test(lookup) ? table[Number(lookup)] : table.find((cells) => cells[0] === parseValue(lookup, sourcePath));
+  if (!row) fail(`no CSV row ${lookup} in vars/${file}`, sourcePath);
+  const [start, stop] = match[3] === undefined ? [1, row.length] : parseRange(match[3], row.length, sourcePath);
+  if (start < 0 || stop < 0 || start > row.length || stop > row.length) fail(`CSV range is out of bounds for row ${lookup} in vars/${file}`, sourcePath);
+  return { name, values: row.slice(start, Math.max(start, stop)).map((value) => ({ value })) };
+}
+
+async function assertProjectPath(candidate, sourcePath) {
+  const relative = path.relative(ROOT, candidate);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) fail("path cannot leave the project", sourcePath);
+  const real = await fs.realpath(candidate).catch(() => candidate);
+  const realRoot = await fs.realpath(ROOT);
+  const realRelative = path.relative(realRoot, real);
+  if (realRelative === ".." || realRelative.startsWith(`..${path.sep}`) || path.isAbsolute(realRelative)) fail("symlink path cannot leave the project", sourcePath);
+}
+
+async function projectPath(candidate, sourcePath) {
+  if (!candidate) fail("folder or file path cannot be empty", sourcePath);
+  const resolved = path.resolve(ROOT, candidate.startsWith("/") ? candidate.slice(1) : candidate);
+  await assertProjectPath(resolved, sourcePath);
+  return resolved;
+}
+
+async function resolveSlatPath(slatName, context, sourcePath) {
+  for (const frame of [...context.fileBindingsStack].reverse()) {
+    if (frame.has(slatName)) return frame.get(slatName);
+  }
+  if (slatName.startsWith("/")) {
+    const candidate = await projectPath(slatName, sourcePath);
+    return fs.realpath(candidate).catch(() => candidate);
+  }
+  assertSafeRelativePath(slatName, "slat");
+  const slatPath = path.join(ROOT, SLATS_DIR, slatName);
+  await assertProjectPath(slatPath, sourcePath);
+  return fs.realpath(slatPath).catch(() => slatPath);
+}
+
+async function extractLocal(name, slatName, context, sourcePath) {
+  const slatPath = await resolveSlatPath(slatName.trim(), context, sourcePath);
+  const key = `${slatPath}::${name}`;
+  if (context.extractionStack.includes(key)) fail(`circular local variable extraction: ${[...context.extractionStack, key].join(" -> ")}`, sourcePath);
+  if (context.extractionStack.length >= MAX_RENDER_DEPTH) fail(`variable extraction depth exceeds ${MAX_RENDER_DEPTH}`, sourcePath);
+  if (!(await exists(slatPath))) fail(`missing slat "${slatName}" for local variable extraction`, sourcePath);
+  context.extractionStack.push(key);
+  const locals = new Map();
+  context.scopedVarsStack.push(locals);
+  try {
+    const { text } = extractIgnoredSections(await fs.readFile(slatPath, "utf8"));
+    // Visit direct declarations only; includes and loop bodies are never evaluated.
+    const tokens = /\[\[|\{\{|%%(?=\s*>*for\b)|\|\|(?=[A-Za-z_][A-Za-z0-9_-]*\s*=)/g;
+    let match;
+    while ((match = tokens.exec(text))) {
+      const opener = match[0];
+      if (opener === "%%" || (opener === "{{" && /^\s*>*for\b/.test(text.slice(match.index + 2)))) {
+        tokens.lastIndex = readLoopBlock(text, match.index, opener, opener === "{{" ? "}}" : "%%", sourcePath).end;
+        continue;
+      }
+      const close = opener === "[[" ? "]]" : opener === "{{" ? "}}" : "||";
+      const end = text.indexOf(close, match.index + 2);
+      if (end < 0) fail(`unclosed command in ${slatName}`, sourcePath);
+      if (opener === "||") await defineLocal(text.slice(match.index + 2, end).trim(), context, slatPath);
+      tokens.lastIndex = end + 2;
+    }
+    if (!locals.has(name)) fail(`local variable "$$${name}" does not exist in ${path.relative(ROOT, slatPath)}`, sourcePath);
+    return locals.get(name);
+  } finally {
+    context.scopedVarsStack.pop();
+    context.extractionStack.pop();
+  }
 }
 
 function extractIgnoredSections(input) {
@@ -211,28 +512,12 @@ function unescapeIgnoreMarkers(input) {
 
 function restoreIgnoredSections(input, ignored) {
   return ignored.reduce(
-    (output, value, index) => output.replaceAll(`__HTMLSLATS_IGNORE_${index}__`, value),
+    (output, value, index) => output.replaceAll(`__HTMLSLATS_IGNORE_${index}__`, () => value),
     input
   );
 }
 
-async function replaceSlats(input, context, sourcePath) {
-  const tokenPattern = /\[\[([^[\]]+?)\]\]/g;
-  let output = "";
-  let cursor = 0;
-
-  for (const match of input.matchAll(tokenPattern)) {
-    output += input.slice(cursor, match.index);
-    const reference = parseSlatReference(match[1].trim(), sourcePath);
-    output += await loadSlat(reference, context, sourcePath);
-    cursor = match.index + match[0].length;
-  }
-
-  output += input.slice(cursor);
-  return output;
-}
-
-function parseSlatReference(expression, sourcePath) {
+function parseSlatReference(expression, sourcePath, context) {
   const [slatName, ...assignmentExpressions] = expression.split("//").map((part) => part.trim());
   const scopedVars = new Map();
 
@@ -244,10 +529,10 @@ function parseSlatReference(expression, sourcePath) {
     }
 
     const [, name, doubleQuoted, singleQuoted, bare] = assignment;
-    scopedVars.set(name, unescapeScopedVarValue(doubleQuoted ?? singleQuoted ?? bare));
+    scopedVars.set(name, replaceScopedVars(unescapeScopedVarValue(doubleQuoted ?? singleQuoted ?? bare), context));
   }
 
-  return { slatName, scopedVars };
+  return { slatName: replaceScopedVars(slatName, context), scopedVars };
 }
 
 function unescapeScopedVarValue(value) {
@@ -256,8 +541,7 @@ function unescapeScopedVarValue(value) {
 
 async function loadSlat(reference, context, sourcePath) {
   const { slatName, scopedVars } = reference;
-  assertSafeRelativePath(slatName, "slat");
-  const slatPath = path.join(ROOT, SLATS_DIR, slatName);
+  const slatPath = await resolveSlatPath(slatName, context, sourcePath);
 
   if (context.slatStack.includes(slatPath)) {
     const chain = [...context.slatStack, slatPath]
@@ -270,10 +554,11 @@ async function loadSlat(reference, context, sourcePath) {
     throw new Error(`htmlslats: missing slat "${slatName}" referenced by ${path.relative(ROOT, sourcePath)}`);
   }
 
+  if (context.slatStack.length >= MAX_RENDER_DEPTH) fail(`include depth exceeds ${MAX_RENDER_DEPTH}`, sourcePath);
   context.slatStack.push(slatPath);
   context.scopedVarsStack.push(scopedVars);
-  const source = await fs.readFile(slatPath, "utf8");
   try {
+    const source = await fs.readFile(slatPath, "utf8");
     return await render(source, context, slatPath);
   } finally {
     context.scopedVarsStack.pop();
@@ -296,21 +581,6 @@ function replaceScopedVars(input, context) {
   return input.replace(/\$\$([A-Za-z_][A-Za-z0-9_-]*)/g, (token, name) => {
     return scopedVars.has(name) ? scopedVars.get(name) : token;
   });
-}
-
-async function replaceVars(input, context, sourcePath) {
-  const tokenPattern = /\{\{([^{}]+?)\}\}/g;
-  let output = "";
-  let cursor = 0;
-
-  for (const match of input.matchAll(tokenPattern)) {
-    output += input.slice(cursor, match.index);
-    output += await resolveVar(match[1].trim(), context, sourcePath);
-    cursor = match.index + match[0].length;
-  }
-
-  output += input.slice(cursor);
-  return output;
 }
 
 async function resolveVar(expression, context, sourcePath) {
@@ -354,6 +624,7 @@ async function loadVars(fileName, context) {
     throw new Error(`htmlslats: missing vars file "${fileName}"`);
   }
 
+  await assertProjectPath(varsPath, varsPath);
   const source = await fs.readFile(varsPath, "utf8");
   const extension = path.extname(fileName).toLowerCase();
   const table = extension === ".csv" ? parseCsv(source) : parseTextVars(source);

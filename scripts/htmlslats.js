@@ -204,7 +204,7 @@ async function renderText(input, context, sourcePath) {
       if (extraction) {
         output += await extractLocal(extraction[1], replaceScopedVars(extraction[2], context), context, sourcePath);
       } else {
-        output += await loadSlat(parseSlatReference(expression, sourcePath, context), context, sourcePath);
+        output += await loadSlat(await parseSlatReference(expression, sourcePath, context), context, sourcePath);
       }
     } else {
       output += await resolveVar(replaceScopedVars(expression, context), context, sourcePath);
@@ -217,8 +217,134 @@ async function renderText(input, context, sourcePath) {
 async function defineLocal(expression, context, sourcePath) {
   const assignment = expression.match(new RegExp(`^(${VARIABLE_NAME})\\s*=\\s*([\\s\\S]*)$`));
   if (!assignment) fail(`invalid local variable declaration "${expression}"`, sourcePath);
-  const value = parseValue(assignment[2], sourcePath);
-  context.scopedVarsStack.at(-1).set(assignment[1], await evaluateValue(value, context, sourcePath));
+  const value = await evaluateDeclaration(assignment[2], context, sourcePath);
+  context.scopedVarsStack.at(-1).set(assignment[1], value);
+}
+
+// Values retain their type until inserted into output. Never evaluate host code.
+function findVariable(name, context) {
+  for (let i = context.scopedVarsStack.length - 1; i >= 0; i--) {
+    if (context.scopedVarsStack[i].has(name)) return context.scopedVarsStack[i].get(name);
+  }
+  return undefined;
+}
+
+function toInteger(value, sourcePath) {
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!/^[+-]?\d+$/.test(text)) fail(`int() requires a decimal integer, received ${JSON.stringify(value)}`, sourcePath);
+    value = Number(text);
+  }
+  if (!Number.isSafeInteger(value)) fail("integer is outside the safe range -9007199254740991 to 9007199254740991", sourcePath);
+  return value;
+}
+
+async function evaluateDeclaration(input, context, sourcePath, depth = 0) {
+  if (depth >= MAX_RENDER_DEPTH) fail(`integer expression nesting exceeds ${MAX_RENDER_DEPTH}`, sourcePath);
+  const value = input.trim();
+  if (value.startsWith('"') || value.startsWith("'")) return evaluateValue(parseValue(value, sourcePath), context, sourcePath);
+  if (/^[+-]?\d+$/.test(value)) return toInteger(value, sourcePath);
+  const reference = value.match(new RegExp(`^\\$\\$(${VARIABLE_NAME})$`));
+  if (reference) return findVariable(reference[1], context) ?? value;
+  const extraction = value.match(new RegExp(`^\\[\\[\\$\\$(${VARIABLE_NAME})\\s+in\\s+(.+)\\]\\]$`));
+  if (extraction) return extractLocal(extraction[1], replaceScopedVars(extraction[2], context), context, sourcePath);
+  if (/^(calc|int)\s*\(/.test(value)) {
+    const call = value.match(/^(calc|int)\s*\(([\s\S]*)\)$/);
+    if (!call) fail(`unclosed integer expression "${value}"`, sourcePath);
+    if (call[1] === "calc") return calculateInteger(call[2], context, sourcePath);
+    const argument = call[2].trim();
+    const named = new RegExp(`^(?:\\$\\$)?(${VARIABLE_NAME})$`).exec(argument);
+    if (named) {
+      const found = findVariable(named[1], context);
+      if (found === undefined) fail(`unknown variable "${named[1]}" in int()`, sourcePath);
+      return toInteger(found, sourcePath);
+    }
+    return toInteger(await evaluateDeclaration(argument, context, sourcePath, depth + 1), sourcePath);
+  }
+  // Shorthand starts with a variable. Keep bare paths, dates and hyphenated text literal.
+  // A minus after a variable requires whitespace, because '-' belongs to variable names.
+  const shorthand = value.match(/^(\$\$)?([A-Za-z_][A-Za-z0-9_-]*)(\s*[+*/%]|\s+-)/);
+  if (shorthand && (shorthand[1] || findVariable(shorthand[2], context) !== undefined || shorthand[3].trim() === "+")) {
+    return calculateInteger(value, context, sourcePath);
+  }
+  return evaluateValue(value, context, sourcePath);
+}
+
+function calculateInteger(expression, context, sourcePath) {
+  if (expression.length > 4096) fail("integer expression exceeds 4096 characters", sourcePath);
+  const tokens = [];
+  let cursor = 0;
+  while (cursor < expression.length) {
+    const rest = expression.slice(cursor);
+    const whitespace = rest.match(/^\s+/);
+    if (whitespace) { cursor += whitespace[0].length; continue; }
+    const token = rest.match(/^(?:\d+|(?:\$\$)?[A-Za-z_][A-Za-z0-9_-]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[()+*/%\-])/);
+    if (!token) fail(`invalid character in integer expression near "${rest.slice(0, 20)}"`, sourcePath);
+    tokens.push(token[0]);
+    cursor += token[0].length;
+  }
+  let index = 0;
+  const problem = (message) => fail(`${message} in integer expression "${expression}"`, sourcePath);
+  const checked = (value) => {
+    if (value < -9007199254740991n || value > 9007199254740991n) problem("integer overflow");
+    return value;
+  };
+  const integer = (value) => {
+    if (typeof value !== "bigint") problem("arithmetic requires integer operands; convert strings with int()");
+    return value;
+  };
+  function primary(depth) {
+    if (depth >= MAX_RENDER_DEPTH) problem(`integer expression nesting exceeds ${MAX_RENDER_DEPTH}`);
+    const token = tokens[index++];
+    if (token === "+" || token === "-") {
+      const operand = integer(primary(depth + 1));
+      return checked(token === "-" ? -operand : operand);
+    }
+    if (token === "(") {
+      const value = addition(depth + 1);
+      if (tokens[index++] !== ")") problem("missing closing parenthesis");
+      return value;
+    }
+    if (token && /^\d+$/.test(token)) return checked(BigInt(token));
+    if (token?.startsWith('"') || token?.startsWith("'")) return parseValue(token, sourcePath);
+    if (token && /^(?:\$\$)?[A-Za-z_]/.test(token)) {
+      if (token === "int" && tokens[index] === "(") {
+        index++;
+        const value = addition(depth + 1);
+        if (tokens[index++] !== ")") problem("missing closing parenthesis for int()");
+        return typeof value === "bigint" ? value : BigInt(toInteger(value, sourcePath));
+      }
+      const name = token.replace(/^\$\$/, "");
+      const value = findVariable(name, context);
+      if (value === undefined) problem(`unknown variable "${name}"`);
+      return typeof value === "number" ? BigInt(value) : value;
+    }
+    problem("expected an integer, variable, or parenthesized expression");
+  }
+  function multiplication(depth) {
+    let value = primary(depth);
+    while (["*", "/", "%"].includes(tokens[index])) {
+      const operator = tokens[index++];
+      const left = integer(value);
+      const right = integer(primary(depth));
+      if ((operator === "/" || operator === "%") && right === 0n) problem("division or remainder by zero");
+      value = checked(operator === "*" ? left * right : operator === "/" ? left / right : left % right);
+    }
+    return value;
+  }
+  function addition(depth) {
+    let value = multiplication(depth);
+    while (["+", "-"].includes(tokens[index])) {
+      const operator = tokens[index++];
+      const left = integer(value);
+      const right = integer(multiplication(depth));
+      value = checked(operator === "+" ? left + right : left - right);
+    }
+    return value;
+  }
+  const result = addition(0);
+  if (index !== tokens.length) problem(`unexpected token "${tokens[index]}"`);
+  return Number(integer(result));
 }
 
 function parseValue(input, sourcePath) {
@@ -370,7 +496,7 @@ async function loopValues(header, context, sourcePath) {
     const match = rest.match(/^\s+in\s+range\(([^()]*)\)\s*$/);
     if (!match) fail(`invalid number loop "for ${header}"`, sourcePath);
     const [start, stop] = parseRange(match[1], undefined, sourcePath);
-    return { name, values: Array.from({ length: Math.max(0, stop - start) }, (_, i) => ({ value: String(start + i) })) };
+    return { name, values: Array.from({ length: Math.max(0, stop - start) }, (_, i) => ({ value: start + i })) };
   }
   const match = rest.match(/^\s+in\s+row\(([^()]*)\)\s+in\s+file\(([^()]*)\)(?:\s+in\s+range\(([^()]*)\))?\s*$/);
   if (!match) fail(`invalid CSV loop "for ${header}"`, sourcePath);
@@ -517,7 +643,7 @@ function restoreIgnoredSections(input, ignored) {
   );
 }
 
-function parseSlatReference(expression, sourcePath, context) {
+async function parseSlatReference(expression, sourcePath, context) {
   const [slatName, ...assignmentExpressions] = expression.split("//").map((part) => part.trim());
   const scopedVars = new Map();
 
@@ -529,7 +655,10 @@ function parseSlatReference(expression, sourcePath, context) {
     }
 
     const [, name, doubleQuoted, singleQuoted, bare] = assignment;
-    scopedVars.set(name, replaceScopedVars(unescapeScopedVarValue(doubleQuoted ?? singleQuoted ?? bare), context));
+    const value = doubleQuoted !== undefined || singleQuoted !== undefined
+      ? replaceScopedVars(unescapeScopedVarValue(doubleQuoted ?? singleQuoted), context)
+      : await evaluateDeclaration(bare, context, sourcePath);
+    scopedVars.set(name, value);
   }
 
   return { slatName: replaceScopedVars(slatName, context), scopedVars };
@@ -579,7 +708,7 @@ function replaceScopedVars(input, context) {
   if (scopedVars.size === 0) return input;
 
   return input.replace(/\$\$([A-Za-z_][A-Za-z0-9_-]*)/g, (token, name) => {
-    return scopedVars.has(name) ? scopedVars.get(name) : token;
+    return scopedVars.has(name) ? String(scopedVars.get(name)) : token;
   });
 }
 

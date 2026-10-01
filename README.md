@@ -99,7 +99,7 @@ Declare a variable anywhere in a page or slat with `||name=value||`, then refere
 <p>$$x</p>
 ```
 
-Declarations produce no output. Commands run in source order: the first paragraph receives `123`, and the second receives `hello world`. Values are strings, not JavaScript or Python expressions. Use bare values or single/double quotes; quoted values support escaped quotes and backslashes. Names start with a letter or underscore and can contain letters, digits, underscores, and hyphens.
+Declarations produce no output. Commands run in source order: the first paragraph receives `123`, and the second receives `hello world`. Variables can hold integers or strings. An unquoted decimal integer such as `123` or `-7` is an integer; single/double quotes always make a string. Other bare text such as `hello` or `hello-world` still works as a string. Quoted values support escaped quotes and backslashes. Names start with a letter or underscore and can contain letters, digits, underscores, and hyphens.
 
 A declaration can copy an existing variable, a global lookup, or an extracted local variable:
 
@@ -110,6 +110,75 @@ A declaration can copy an existing variable, a global lookup, or an extracted lo
 ```
 
 Local declarations can redefine inherited or scoped variables. The new value applies to the current file and the slats it subsequently includes. It does not change the caller's value. Each loop iteration has its own scope, so assignments in one iteration do not carry over to the next or escape the loop. An undefined ordinary `$$name` remains literal, as with scoped variables.
+
+### Integer Arithmetic
+
+Use integer variables in calculations and redefine them as needed:
+
+```html
+||x=0||
+||x=x+1||
+<p>$$x</p>
+```
+
+This prints `1`. For longer expressions, use `calc(...)`:
+
+```html
+||count=7||
+||last=calc(count - 1)||
+||columns=calc((count + 2) / 3)||
+<p>Last: $$last; columns: $$columns</p>
+```
+
+This prints `Last: 6; columns: 3`. Within calculations, `x` and `$$x` both refer to the variable. `calc(...)` is recommended for expressions starting with numbers or parentheses and whenever a value might be mistaken for ordinary text. Shorthand beginning with an existing variable also supports `x * 2`, `x / 2`, `x % 2`, and `x - 1`; `x+1` and `$$x+1` are always treated as calculations, with errors for missing variables. Quote text that resembles arithmetic.
+
+Supported operations are `+`, `-`, `*`, `/`, and `%` (remainder), with normal precedence: unary signs, then multiplication/division/remainder, then addition/subtraction. Parentheses control grouping. Division truncates toward zero: `calc(7 / 3)` is `2`, and `calc(-7 / 3)` is `-2`. Remainders follow the dividend's sign: `calc(-7 % 3)` is `-1`. Floating-point literals, exponentiation, comparisons, and arbitrary JavaScript/Python code are not supported.
+
+**Subtraction needs whitespace after variable names**, because hyphens are valid in names: use `calc(x - 1)` or `||x=x - 1||`. `x-1` is treated as a name or bare text, not subtraction. A hyphenated variable such as `item-count` remains valid: `calc(item-count + 1)`.
+
+### Types, Conversion, and Copies
+
+Quoted numeric text stays a string, so identifiers and leading zeroes can be preserved:
+
+```html
+||code="007"||
+||number=int($$code)||
+||number=number+1||
+<p>Code: $$code; next: $$number</p>
+```
+
+This prints `Code: 007; next: 8`. `int(...)` converts an integer or a string containing only a decimal integer (optional sign and surrounding whitespace). It rejects blank strings, fractions, and other text. Inside `calc(...)`, use `int(variable)` when a string must participate in arithmetic:
+
+```html
+||count="7"||
+||next=calc(int(count) + 1)||
+```
+
+CSV/TXT lookups and CSV loop values stay strings, even when their contents are digits. Convert them explicitly:
+
+```html
+||count=int({{site.csv//Items//1}})||
+||stop=calc(count + 1)||
+%%>for number x in range(1,$$stop)
+>> <span>$$x</span>
+%%
+```
+
+This example expects an `Items` row with a decimal integer in column `1`. Direct copies with `||copy=$$x||` and local extractions with `||copy=[[$$x in chart.html]]||` preserve the source type. Combining values into text, or quoting an interpolated value (`||copy="$$x"||`), produces a string. An unquoted bare name such as `||copy=x||` remains literal text; use `$$x` to copy it.
+
+Scoped arguments follow the same type rules: `[[chart.html//y=3]]` passes an integer, `[[chart.html//y=$$x]]` preserves `x`'s type, and `[[chart.html//y="3"]]` or `[[chart.html//y="$$x"]]` passes a string. Output always prints either type as text. Quote digit-only values when their original formatting matters: bare `007` becomes integer `7`.
+
+Number-loop variables are integers. For example, convert zero-based values to one-based values before passing them to a slat:
+
+```html
+%%>for number x in range(0,3)
+>> ||x=x+1||[[chart.html//y=$$x]]
+%%
+```
+
+The slat receives integers `1`, `2`, and `3`. Loop ranges are determined before their bodies render, so redefining `x` does not alter iteration order or the range. Existing scope rules still apply: incrementing a variable defined outside a loop creates an iteration-local value; it does **not** accumulate across iterations or change the outer variable.
+
+Arithmetic rejects string operands, unknown variables, malformed expressions, division/remainder by zero, and integer overflow with source-file context. Integers and every intermediate arithmetic result must be between `-9007199254740991` and `9007199254740991`, inclusive. Expressions are limited to 4096 characters and 64 levels of nesting. No host-language evaluation is used.
 
 ### Extract a Local Variable
 

@@ -198,8 +198,7 @@ CSV/TXT lookups and CSV loop values stay strings, even when their contents are d
 
 ```html
 ||count=int({{site.csv//Items//1}})||
-||stop=calc(count + 1)||
-%%>for number x in range(1,$$stop)
+%%>for number x in range(1,$$count)
 >> <span>$$x</span>
 %%
 ```
@@ -211,7 +210,7 @@ Scoped arguments follow the same type rules: `[[chart.html//y=3]]` passes an int
 Number-loop variables are integers. For example, convert zero-based values to one-based values before passing them to a slat:
 
 ```html
-%%>for number x in range(0,3)
+%%>for number x in range(0,2)
 >> ||x=x+1||[[chart.html//y=$$x]]
 %%
 ```
@@ -326,7 +325,9 @@ Or pass the number to the same slat on every iteration:
 %%
 ```
 
-Ranges follow Python's two-argument behavior: the start is included, the stop is excluded, and the increment is `1`. `range(0,7)` uses `0` through `6`. Negative integer bounds are allowed; a stop at or below the start produces no iterations. Steps and `end` are not supported for number loops.
+Ranges include both endpoints and increment by `1`. `range(1,7)` uses `1` through `7`, and `range(0,7)` uses `0` through `7`. Equal bounds produce one iteration: `range(1,1)` uses just `1`. Negative integer bounds are allowed; a stop below the start produces no iterations. Steps and `end` are not supported for number loops.
+
+Earlier versions excluded the stop. Remove any extra `+ 1` used to include a final row: use `range(1,$$rowCount)` directly. For a fixed number of zero-based iterations, use `range(0,6)` for seven iterations.
 
 ### Loop Through a CSV Row
 
@@ -344,7 +345,7 @@ CSV files resolve inside `vars/`, so this reads `vars/vars.csv`. Rows and column
 %%
 ```
 
-`end` means the number of cells in the selected row; the stop is still exclusive. `range(0,end)` includes the first cell (the lookup key). Omit `in range(...)` to use all cells except that first cell:
+CSV ranges also include both endpoints. `range(1,5)` visits columns `1` through `5`. `end` means the last column's zero-based index (the number of cells minus one). `range(0,end)` includes every cell, including the lookup key; `range(1,end)` includes every cell after the key. These `end` ranges select the same cells as in earlier versions. A row containing only a key has `end = 0`, so `range(1,end)` is empty. Omit `in range(...)` to use all cells except that first cell:
 
 ```html
 %%>for col x in row(tagline) in file(vars.csv)
@@ -352,16 +353,16 @@ CSV files resolve inside `vars/`, so this reads `vars/vars.csv`. Rows and column
 %%
 ```
 
-Empty cells are included as empty strings. Duplicate keys use the first matching row. Quote a numeric key to distinguish it from a row index: `row("123")`. Missing rows, invalid ranges, and bounds outside the selected row produce clear build errors. Column loops require a `.csv` file.
+Empty cells are included as empty strings. Equal bounds select one cell; reversed bounds select none. The stop must be an existing column index; the start may also be one past the last column to select an empty range. Duplicate keys use the first matching row. Quote a numeric key to distinguish it from a row index: `row("123")`. Missing rows, invalid ranges, and bounds outside the selected row produce clear build errors. Column loops require a `.csv` file.
 
 ### Nested Loops and Depth
 
 Each additional `>` adds a level. A loop at depth `>` repeats its `>>` body; a nested loop at `>>` repeats its `>>>` body. Return to `>>` to continue the outer body:
 
 ```html
-%%>for number x in range(0,2)
+%%>for number x in range(0,1)
 >> <section>
->>for number y in range(0,3)
+>>for number y in range(0,2)
 >>> <span>$$x,$$y</span>
 >> </section>
 %%

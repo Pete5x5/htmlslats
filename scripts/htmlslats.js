@@ -481,7 +481,7 @@ function parseRange(input, end, sourcePath) {
   const start = Number(match[1]);
   const stop = match[2] === "end" ? end : Number(match[2]);
   if (!Number.isSafeInteger(start) || !Number.isSafeInteger(stop)) fail("range bounds must be safe integers", sourcePath);
-  if (stop - start > MAX_ITERATIONS) fail(`range exceeds the loop iteration limit of ${MAX_ITERATIONS}`, sourcePath);
+  if (BigInt(stop) - BigInt(start) + 1n > BigInt(MAX_ITERATIONS)) fail(`range exceeds the loop iteration limit of ${MAX_ITERATIONS}`, sourcePath);
   return [start, stop];
 }
 
@@ -508,7 +508,7 @@ async function loopValues(header, context, sourcePath) {
     const match = rest.match(/^\s+in\s+range\(([^()]*)\)\s*$/);
     if (!match) fail(`invalid number loop "for ${header}"`, sourcePath);
     const [start, stop] = parseRange(match[1], undefined, sourcePath);
-    return { name, values: Array.from({ length: Math.max(0, stop - start) }, (_, i) => ({ value: start + i })) };
+    return { name, values: Array.from({ length: Math.max(0, stop - start + 1) }, (_, i) => ({ value: start + i })) };
   }
   const match = rest.match(/^\s+in\s+row\(([^()]*)\)\s+in\s+file\(([^()]*)\)(?:\s+in\s+range\(([^()]*)\))?\s*$/);
   if (!match) fail(`invalid CSV loop "for ${header}"`, sourcePath);
@@ -519,9 +519,9 @@ async function loopValues(header, context, sourcePath) {
   const lookup = match[1].trim();
   const row = /^\d+$/.test(lookup) ? table[Number(lookup)] : table.find((cells) => cells[0] === parseValue(lookup, sourcePath));
   if (!row) fail(`no CSV row ${lookup} in vars/${file}`, sourcePath);
-  const [start, stop] = match[3] === undefined ? [1, row.length] : parseRange(match[3], row.length, sourcePath);
-  if (start < 0 || stop < 0 || start > row.length || stop > row.length) fail(`CSV range is out of bounds for row ${lookup} in vars/${file}`, sourcePath);
-  return { name, values: row.slice(start, Math.max(start, stop)).map((value) => ({ value })) };
+  const [start, stop] = match[3] === undefined ? [1, row.length - 1] : parseRange(match[3], row.length - 1, sourcePath);
+  if (start < 0 || stop < 0 || start > row.length || stop >= row.length) fail(`CSV range is out of bounds for row ${lookup} in vars/${file}`, sourcePath);
+  return { name, values: row.slice(start, Math.max(start, stop + 1)).map((value) => ({ value })) };
 }
 
 async function assertProjectPath(candidate, sourcePath) {

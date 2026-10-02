@@ -123,18 +123,18 @@ await check({
 }, "123hello worldscopedchildchildhello worldhello worldchildchildhello world");
 
 await check({
-  "index.html": '||x="outer"||%%>for number x in range(0,3)>>$$x:[[chart-$$x.html]]:[[chart.html//y=$$x]];%%$$x',
+  "index.html": '||x="outer"||%%>for number x in range(0,2)>>$$x:[[chart-$$x.html]]:[[chart.html//y=$$x]];%%$$x',
   "slats/chart-0.html": "zero", "slats/chart-1.html": "one", "slats/chart-2.html": "two",
   "slats/chart.html": "$$y"
 }, "0:zero:0;1:one:1;2:two:2;outer");
 
-await check({ "index.html": '%%>for number x in range(0,2)\n>>[$$x]%%{{>for number x in range(0,2)>>[$$x]}}%%for number x in range(2,0)>>unused%%' }, "[0][1][0][1]");
-await check({ "index.html": '%%>for number x in range(-2,1)>>$$x;%%' }, "-2;-1;0;");
-await check({ "index.html": '%%>for number x in range(0,2)>>A$$x>>for number y in range(0,2)>>>[$$x,$$y]>>B$$x%%' }, "A0[0,0][0,1]B0A1[1,0][1,1]B1");
-await check({ "index.html": '{{>for number x in range(0,2)>>%%>for number y in range(0,2)>>[$$x,$$y]%%}}' }, "[0,0][0,1][1,0][1,1]");
-await check({ "index.html": '%%>for number x in range(0,2)>>{{>for number y in range(0,2)>>[$$x,$$y]}}%%' }, "[0,0][0,1][1,0][1,1]");
-await check({ "index.html": '%%>for number x in range(0,2)>>||y=$$x||$$y%%$$y' }, "01$$y");
-await check({ "index.html": '||n=2||%%>for number x in range(0,$$n)>>$$x{{site.csv//a//1}}%%', "vars/site.csv": "a,hello" }, "0hello1hello");
+await check({ "index.html": '%%>for number x in range(0,1)\n>>[$$x]%%{{>for number x in range(0,1)>>[$$x]}}%%for number x in range(2,0)>>unused%%' }, "[0][1][0][1]");
+await check({ "index.html": '%%>for number x in range(-2,0)>>$$x;%%' }, "-2;-1;0;");
+await check({ "index.html": '%%>for number x in range(0,1)>>A$$x>>for number y in range(0,1)>>>[$$x,$$y]>>B$$x%%' }, "A0[0,0][0,1]B0A1[1,0][1,1]B1");
+await check({ "index.html": '{{>for number x in range(0,1)>>%%>for number y in range(0,1)>>[$$x,$$y]%%}}' }, "[0,0][0,1][1,0][1,1]");
+await check({ "index.html": '%%>for number x in range(0,1)>>{{>for number y in range(0,1)>>[$$x,$$y]}}%%' }, "[0,0][0,1][1,0][1,1]");
+await check({ "index.html": '%%>for number x in range(0,1)>>||y=$$x||$$y%%$$y' }, "01$$y");
+await check({ "index.html": '||n=1||%%>for number x in range(0,$$n)>>$$x{{site.csv//a//1}}%%', "vars/site.csv": "a,hello" }, "0hello1hello");
 
 await check({
   "docs/index.html": '[[docs-content.html//x="/docs"]]',
@@ -153,50 +153,79 @@ await check({ "index.html": '%%>for file x in folder(docs)>>$$x;%%', "docs/a.md"
 await check({ "index.html": '%%>for file x of type(.md) in folder(docs)>>[[$$x]]%%', "docs/a.md": "[[/index.html]]" }, /circular slat reference/);
 await check({ "index.html": '[[/docs/a.md]]', "docs/a.md": "raw markdown" }, "raw markdown");
 
+// Both endpoints are included for number and CSV ranges.
+await check({ "index.html": '%%>for number z in range(1,7)>>$$z;%%' }, "1;2;3;4;5;6;7;");
+await check({ "index.html": '{{>for number z in range(1,1)>>$$z;}}%%>for number z in range(0,0)>>$$z;%%' }, "1;0;");
+await check({ "index.html": '%%>for number z in range(-2,1)>>$$z;%%' }, "-2;-1;0;1;");
+await check({ "index.html": '%%>for number z in range(-2,-2)>>$$z;%%' }, "-2;");
+await check({ "index.html": '%%>for number z in range(1,0)>>unused%%' }, "");
+await check({ "index.html": '%%>for number z in range(9007199254740990,9007199254740991)>>$$z;%%' }, "9007199254740990;9007199254740991;");
+await check({ "index.html": '%%>for number z in range(-9007199254740991,-9007199254740990)>>$$z;%%' }, "-9007199254740991;-9007199254740990;");
+await check({ "index.html": '%%>for number z in range(-9007199254740991,9007199254740991)>>$$z%%' }, /iteration limit/);
+await check({ "index.html": '%%>for number z in range(9007199254740991,9007199254740992)>>$$z%%' }, /range bounds must be safe integers/);
+
+// A CSV counter feeds chart ranges directly, including zero and one model.
+await check({
+  "index.html": '[[sect-product.html//series="empty"]]|[[sect-product.html//series="single"]]|[[sect-product.html//series="seven"]]',
+  "slats/sect-product.html": '||rowCount=0||%%>for col model in row($$series) in file(models.csv) in range(1,end)>>||rowCount:=rowCount+1||%%[[chart.html]]',
+  "slats/chart.html": '%%>for number z in range(1,$$rowCount)>>[[chart-row.html//i=$$z]]%%',
+  "slats/chart-row.html": '<tr>$$i</tr>',
+  "vars/models.csv": 'empty\nsingle,a\nseven,a,b,c,d,e,f,g'
+}, '|<tr>1</tr>|<tr>1</tr><tr>2</tr><tr>3</tr><tr>4</tr><tr>5</tr><tr>6</tr><tr>7</tr>');
+
+await check({ "index.html": '%%>for col x in row(a) in file(a.csv) in range(1,2)>>[$$x]%%', "vars/a.csv": "a,b,c" }, "[b][c]");
+await check({ "index.html": '{{>for col x in row(a) in file(a.csv) in range(2,2)>>[$$x]}}', "vars/a.csv": "a,b,c" }, "[c]");
+await check({ "index.html": '%%>for col x in row(a) in file(a.csv) in range(2,1)>>unused%%', "vars/a.csv": "a,b,c" }, "");
+await check({ "index.html": '%%>for col x in row(a) in file(a.csv) in range(0,end)>>[$$x]%%', "vars/a.csv": "a" }, "[a]");
+await check({ "index.html": '%%>for col x in row(a) in file(a.csv) in range(0,3)>>$$x%%', "vars/a.csv": "a,b,c" }, /CSV range is out of bounds/);
+await check({ "index.html": '%%>for col x in row(a) in file(a.csv) in range(-1,1)>>$$x%%', "vars/a.csv": "a,b,c" }, /CSV range is out of bounds/);
+await check({ "index.html": '%%>for col x in row(a) in file(a.csv) in range(4,end)>>$$x%%', "vars/a.csv": "a,b,c" }, /CSV range is out of bounds/);
+await check({ "index.html": '%%>for col x in row(a) in file(a.csv) in range(1,end)>>%%', "vars/a.csv": `a,${Array(10001).fill("b").join(",")}` }, /iteration limit/);
+
 // Explicit enclosing assignments accumulate without changing local assignment rules.
 await check({ "index.html": '||x="models"||||modelCount=0||%%>for col y in row($$x) in file(models.csv) in range(1,end)>>||modelCount:=$$modelCount+1||$$modelCount;%%$$modelCount', "vars/models.csv": "models,a,b,c" }, "1;2;3;3");
-await check({ "index.html": '||n=0||%%>for number x in range(0,2)>>for number y in range(0,2)>>>||n:=calc(n+1)||%%$$n' }, "4");
-await check({ "index.html": '||n=0||%%>for number x in range(0,2)>>||n=n+1||$$n%%$$n' }, "110");
+await check({ "index.html": '||n=0||%%>for number x in range(0,1)>>for number y in range(0,1)>>>||n:=calc(n+1)||%%$$n' }, "4");
+await check({ "index.html": '||n=0||%%>for number x in range(0,1)>>||n=n+1||$$n%%$$n' }, "110");
 await check({ "index.html": '||n=0||[[child.html]]$$n', "slats/child.html": '||n:=n+1||' }, "1");
 await check({ "index.html": '||n=0||[[child.html//n=10]]$$n', "slats/child.html": '||n:=n+1||$$n' }, "110");
-await check({ "index.html": '||n=0||%%>for number x in range(0,0)>>||n:=n+1||%%$$n' }, "0");
+await check({ "index.html": '||n=0||%%>for number x in range(1,0)>>||n:=n+1||%%$$n' }, "0");
 await check({ "index.html": '||n=0||[]IGNORE[]||n:=n+1||[]/IGNORE[]$$n' }, "||n:=n+1||0");
 await check({ "index.html": '||n:=1||' }, /no enclosing variable.*n.*index.html/);
 await check({ "index.html": '||n=0||||n:=1||' }, /no enclosing variable/);
 await check({ "index.html": '||n=0||[[$$x in child.html]]$$n', "slats/child.html": '||n:=n+1||||x=2||' }, "20");
 await check({ "index.html": '||n=0||[[$$n in child.html]]', "slats/child.html": '||n:=n+1||' }, /does not exist/);
-await check({ "index.html": '||n="0"||%%>for number x in range(0,1)>>||n:=n+1||%%' }, /integer/);
+await check({ "index.html": '||n="0"||%%>for number x in range(0,0)>>||n:=n+1||%%' }, /integer/);
 
 const csv = 'tagline,"hello, world",two,,four\ntagline,second\n123,numeric key';
 await check({ "index.html": '%%>for col x in row(tagline) in file(vars.csv)>>[$$x]%%', "vars/vars.csv": csv }, "[hello, world][two][][four]");
-await check({ "index.html": '%%>for col x in row(0) in file(vars.csv) in range(1,3)>>[$$x]%%', "vars/vars.csv": csv }, "[hello, world][two]");
+await check({ "index.html": '%%>for col x in row(0) in file(vars.csv) in range(1,3)>>[$$x]%%', "vars/vars.csv": csv }, "[hello, world][two][]");
 await check({ "index.html": '%%>for col x in row(tagline) in file(vars.csv) in range(0,end)>>[$$x]%%', "vars/vars.csv": csv }, "[tagline][hello, world][two][][four]");
 await check({ "index.html": '%%>for col x in row("123") in file(vars.csv)>>$$x%%', "vars/vars.csv": csv }, "numeric key");
-await check({ "index.html": '%%>for col x in row(tagline) in file(vars.csv) in range(1,3)>>[[chart.html//y=$$x]]%%', "vars/vars.csv": csv, "slats/chart.html": "<p>$$y</p>" }, "<p>hello, world</p><p>two</p>");
+await check({ "index.html": '%%>for col x in row(tagline) in file(vars.csv) in range(1,3)>>[[chart.html//y=$$x]]%%', "vars/vars.csv": csv, "slats/chart.html": "<p>$$y</p>" }, "<p>hello, world</p><p>two</p><p></p>");
 
 await check({ "index.html": '[[$$x in chart.html]]', "slats/chart.html": '[[missing.html]]||x="hello"||<p>not inserted</p>' }, "hello");
 await check({ "index.html": '||fallback="outer"||[[$$x in chart.html]]$$fallback', "slats/chart.html": '||x=$$fallback|| ||x={{site.csv//a//1}}||', "vars/site.csv": "a,copy" }, "copyouter");
-await check({ "index.html": '[[$$x in chart.html]]', "slats/chart.html": '[]IGNORE[]||x="ignored"||[]/IGNORE[]%%>for number n in range(0,1)>>||x=loop||%%||x=local||' }, "local");
+await check({ "index.html": '[[$$x in chart.html]]', "slats/chart.html": '[]IGNORE[]||x="ignored"||[]/IGNORE[]%%>for number n in range(0,0)>>||x=loop||%%||x=local||' }, "local");
 await check({ "index.html": '[[$$x in a.html]]', "slats/a.html": '||x=[[$$y in b.html]]||', "slats/b.html": '||y=copy||' }, "copy");
 await check({ "index.html": '||x="old"||||x=$$x new||$$x' }, "old new");
-await check({ "index.html": '[]IGNORE[]||x=1||%%>for number x in range(0,2)>>$$x%%[[$$x in absent.html]][]/IGNORE[]' }, '||x=1||%%>for number x in range(0,2)>>$$x%%[[$$x in absent.html]]');
+await check({ "index.html": '[]IGNORE[]||x=1||%%>for number x in range(0,1)>>$$x%%[[$$x in absent.html]][]/IGNORE[]' }, '||x=1||%%>for number x in range(0,1)>>$$x%%[[$$x in absent.html]]');
 
 await check({ "index.html": '||x=outer||[[$$x in a.html]]', "slats/a.html": '[[b.html]]', "slats/b.html": '||x=nested||' }, /local variable "\$\$x" does not exist in slats\/a.html/);
 await check({ "index.html": '[[$$x in a.html]]', "slats/a.html": '||x=[[$$x in b.html]]||', "slats/b.html": '||x=[[$$x in a.html]]||' }, /circular local variable extraction/);
-await check({ "index.html": '%%>for number x in range(0,2)>>$$x' }, /unclosed loop/);
-await check({ "index.html": '%%>for number x in range(0,2)>>>>$$x%%' }, /loop depth jumps/);
-await check({ "index.html": '%%>for number x in range(0,10001)>>$$x%%' }, /iteration limit/);
-await check({ "index.html": '%%>for number x in range(0,101)>>for number y in range(0,100)>>>$$y%%' }, /iteration limit/);
+await check({ "index.html": '%%>for number x in range(0,1)>>$$x' }, /unclosed loop/);
+await check({ "index.html": '%%>for number x in range(0,1)>>>>$$x%%' }, /loop depth jumps/);
+await check({ "index.html": '%%>for number x in range(0,10000)>>$$x%%' }, /iteration limit/);
+await check({ "index.html": '%%>for number x in range(0,100)>>for number y in range(0,99)>>>$$y%%' }, /iteration limit/);
 await check({ "index.html": '%%>for number x in range(0,end)>>$$x%%' }, /invalid range/);
 await check({ "index.html": '%%>for col x in row(missing) in file(a.csv)>>$$x%%', "vars/a.csv": "a,b" }, /no CSV row missing/);
-await check({ "index.html": '%%>for col x in row(a) in file(a.csv) in range(0,9)>>$$x%%', "vars/a.csv": "a,b" }, /CSV range is out of bounds/);
+await check({ "index.html": '%%>for col x in row(a) in file(a.csv) in range(0,8)>>$$x%%', "vars/a.csv": "a,b" }, /CSV range is out of bounds/);
 await check({ "index.html": '%%>for file x in folder(../outside)>>$$x%%' }, /path cannot leave the project/);
 await check({ "index.html": '%%>for file x in folder(missing)>>$$x%%' }, /missing loop folder/);
 await check({ "index.html": '[[../outside.html]]' }, /path cannot leave its folder/);
 await check({ "index.html": '[[linked.html]]' }, /symlink path cannot leave the project/, { setup: (root) => fs.symlink(cliPath, path.join(root, "slats/linked.html")) });
 
 let tooDeep = "";
-for (let depth = 1; depth <= 33; depth++) tooDeep += `${">".repeat(depth)}for number n in range(0,1)\n`;
+for (let depth = 1; depth <= 33; depth++) tooDeep += `${">".repeat(depth)}for number n in range(0,0)\n`;
 tooDeep += `${">".repeat(34)}$$n`;
 await check({ "index.html": `%%${tooDeep}%%` }, /loop nesting exceeds 32/);
 const includeChain = { "index.html": "[[0.txt]]" };
@@ -207,14 +236,14 @@ await check({
   "index.html": '%%>for file doc of type(.md) in folder(/docs)>>[[doc-card.html//filename=$$doc]]%%',
   "slats/doc-card.html": '<article>$$filename:[[$$filename]]</article>', "docs/a.md": "A", "docs/b.md": "B"
 }, '<article>a.md:A</article><article>b.md:B</article>');
-await check({ "index.html": '%%>for number n in range(0,2)>>[]IGNORE[]>>$$n[]/IGNORE[]%%' }, '>>$$n>>$$n');
-await check({ "index.html": '{{>for number x in range(0,2)>>{{>for number y in range(0,2)>>$$x,$$y;}}}}' }, '0,0;0,1;1,0;1,1;');
-await check({ "index.html": '%%>for number x in range(0,2)>>%%>for number y in range(0,2)>>$$x,$$y;%%%%' }, '0,0;0,1;1,0;1,1;');
+await check({ "index.html": '%%>for number n in range(0,1)>>[]IGNORE[]>>$$n[]/IGNORE[]%%' }, '>>$$n>>$$n');
+await check({ "index.html": '{{>for number x in range(0,1)>>{{>for number y in range(0,1)>>$$x,$$y;}}}}' }, '0,0;0,1;1,0;1,1;');
+await check({ "index.html": '%%>for number x in range(0,1)>>%%>for number y in range(0,1)>>$$x,$$y;%%%%' }, '0,0;0,1;1,0;1,1;');
 await check({ "index.html": '||x="50%%"||$$x' }, '50%%');
 await check({ "index.html": '%%>for file x of type(.md)>>[[$$x]]%%', "a.md": "A" }, 'A');
 await check({ "index.html": '%%>for file x in folder(empty)>>unused%%' }, '', { setup: (root) => fs.mkdir(path.join(root, "empty")) });
-await check({ "index.html": '%%>for number n in range(0,10000)>>%%', "second.html": '%%>for number n in range(0,10000)>>%%' }, '');
-await check({ "index.html": '%%>for number n in range(0,2)>>for number n in range(2,4)>>>$$n>>$$n%%' }, '230231');
+await check({ "index.html": '%%>for number n in range(0,9999)>>%%', "second.html": '%%>for number n in range(0,9999)>>%%' }, '');
+await check({ "index.html": '%%>for number n in range(0,1)>>for number n in range(2,3)>>>$$n>>$$n%%' }, '230231');
 await check({ "index.html": '%%>for col x in row(a) in file(a.csv)>>$$x%%', "vars/a.csv": "a" }, '');
 await check({ "index.html": '%%>for file x in folder(alias)>>[[$$x]]%%', "a.txt": "A" }, 'A', {
   setup: (root) => fs.symlink(root, path.join(root, "alias"))
@@ -226,7 +255,7 @@ const extractionChain = { "index.html": '[[$$x in 0.txt]]' };
 for (let i = 0; i < 65; i++) extractionChain[`slats/${i}.txt`] = i === 64 ? '||x=done||' : `||x=[[$$x in ${i + 1}.txt]]||`;
 await check(extractionChain, /variable extraction depth exceeds 64/);
 const loopChain = { "index.html": '[[0.txt]]' };
-for (let i = 0; i < 33; i++) loopChain[`slats/${i}.txt`] = `%%>for number n in range(0,1)>>${i === 32 ? '$$n' : `[[${i + 1}.txt]]`}%%`;
+for (let i = 0; i < 33; i++) loopChain[`slats/${i}.txt`] = `%%>for number n in range(0,0)>>${i === 32 ? '$$n' : `[[${i + 1}.txt]]`}%%`;
 await check(loopChain, /loop nesting exceeds 32/);
 console.log("htmlslats loop and local variable tests passed");
 
@@ -247,10 +276,10 @@ await check({ "index.html": '||x=7||[[child.html//y=$$x]]$$x[[child.html//y=2]]'
 await check({ "index.html": '||x=7||[[child.html]]$$x', "slats/child.html": '||x=x+1||$$x;' }, '8;7');
 await check({ "index.html": '||x=[[$$n in numbers.html]]||||x=x+1||$$x', "slats/numbers.html": '||n=40||||n=n+1||[[missing.html]]' }, '42');
 await check({ "index.html": '||x=int([[$$n in numbers.html]])||||x=x+1||$$x', "slats/numbers.html": '||n="41"||' }, '42');
-await check({ "index.html": '||stop=calc(2*2)||%%>for number x in range(0,$$stop)>>||x=x+1||[[chart-$$x.html]]%%', "slats/chart-1.html": '1', "slats/chart-2.html": '2', "slats/chart-3.html": '3', "slats/chart-4.html": '4' }, '1234');
-await check({ "index.html": '%%>for number x in range(0,3)>>[[chart.html//y=$$x]]%%', "slats/chart.html": '||y=y+1||$$y' }, '123');
+await check({ "index.html": '||stop=calc(2*2 - 1)||%%>for number x in range(0,$$stop)>>||x=x+1||[[chart-$$x.html]]%%', "slats/chart-1.html": '1', "slats/chart-2.html": '2', "slats/chart-3.html": '3', "slats/chart-4.html": '4' }, '1234');
+await check({ "index.html": '%%>for number x in range(0,2)>>[[chart.html//y=$$x]]%%', "slats/chart.html": '||y=y+1||$$y' }, '123');
 await check({ "index.html": '%%>for col x in row(counts) in file(data.csv)>>||n=int(x)||||n=n+1||$$n;%%', "vars/data.csv": 'counts,1,2,3' }, '2;3;4;');
-await check({ "index.html": '||x=5||%%>for number n in range(0,3)>>||x=x+1||$$x;%%$$x' }, '6;6;6;5');
+await check({ "index.html": '||x=5||%%>for number n in range(0,2)>>||x=x+1||$$x;%%$$x' }, '6;6;6;5');
 await check({ "index.html": '||x-y=3||||x-y=calc($$x-y + 1)||$$x-y' }, '4');
 await check({ "index.html": '||x=3||||literal=x-1||$$literal||x=x - 1||,$$x' }, 'x-1,2');
 await check({ "index.html": '||x=-9007199254740991||$$x||x=9007199254740991||,$$x||x=x - 1||,$$x' }, '-9007199254740991,9007199254740991,9007199254740990');

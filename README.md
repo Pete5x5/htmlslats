@@ -111,7 +111,45 @@ A declaration can copy an existing variable, a global lookup, or an extracted lo
 ||label=[[$$title in card.html]]||
 ```
 
-Local declarations can redefine inherited or scoped variables. The new value applies to the current file and the slats it subsequently includes. It does not change the caller's value. Each loop iteration has its own scope, so assignments in one iteration do not carry over to the next or escape the loop. An undefined ordinary `$$name` remains literal, as with scoped variables.
+Local declarations can redefine inherited or scoped variables. The new value applies to the current file and the slats it subsequently includes. It does not change the caller's value. Each loop iteration has its own scope, so local `=` assignments in one iteration do not carry over to the next or escape the loop. An undefined ordinary `$$name` remains literal, as with scoped variables.
+
+### Outer Variable Updates (`:=`)
+
+Use `=` for a local variable and `:=` when you deliberately want to change a variable outside the current loop iteration or slat. Keeping these separate lets reusable slats and loops use common names such as `x` without accidentally changing their caller's variables.
+
+For example, count the cells after the key in a CSV row:
+
+```html
+||x="models"||
+||modelCount=0||
+%%>for col y in row($$x) in file(models.csv) in range(1,end)
+>>||modelCount:=$$modelCount+1||%%
+<p>$$modelCount</p>
+```
+
+Here, `modelCount` is defined outside the loop. Each `:=` updates that same counter, so its value survives the end of each iteration. A row such as `models,a,b,c` produces a count of `3`. Using `=` inside the loop would create a temporary local counter for each iteration and leave the original counter at `0`.
+
+A child slat can also deliberately update a variable in the slat that called it:
+
+```html
+<!-- Parent slat -->
+||x=0||
+[[child.html]]
+<p>$$x</p>
+```
+
+```html
+<!-- slats/child.html -->
+||x:=1||
+```
+
+The parent prints `1`. If the child used `||x=1||`, its change would stay local and the parent would print `0`.
+
+An outer variable update skips the current set of local variables and searches outward through containing loop iterations, scoped arguments, and calling slats/pages. It updates the first matching variable it finds. If you pass `[[child.html//x=5]]`, the child's `||x:=1||` updates that temporary scoped argument, leaving the parent's `x` unchanged. If no outer variable with that name exists, the update raises an error; use `=` to declare a new local variable.
+
+The right-hand value follows the same typing, arithmetic, and conversion rules as `=`. It is evaluated before the update, and references such as `$$x` still read the nearest visible value, including a current local variable with that name. For predictable counters, use a separate name from the loop variable and avoid redefining that counter locally. `:=` always targets an outer variable, even when a variable with the same name exists locally.
+
+Outer variable updates are skipped during local extraction (`[[$$x in child.html]]`), so extraction cannot change the caller's variables. They do not count as local declarations.
 
 ### Integer Arithmetic
 
@@ -178,7 +216,7 @@ Number-loop variables are integers. For example, convert zero-based values to on
 %%
 ```
 
-The slat receives integers `1`, `2`, and `3`. Loop ranges are determined before their bodies render, so redefining `x` does not alter iteration order or the range. Existing scope rules still apply: incrementing a variable defined outside a loop creates an iteration-local value; it does **not** accumulate across iterations or change the outer variable.
+The slat receives integers `1`, `2`, and `3`. Loop ranges are determined before their bodies render, so redefining `x` does not alter iteration order or the range. Using `=` to increment a variable defined outside a loop creates an iteration-local value; it does **not** accumulate across iterations or change the outer variable. Use an outer variable update (`:=`) when you want the counter to accumulate.
 
 Arithmetic rejects string operands, unknown variables, malformed expressions, division/remainder by zero, and integer overflow with source-file context. Integers and every intermediate arithmetic result must be between `-9007199254740991` and `9007199254740991`, inclusive. Expressions are limited to 4096 characters and 64 levels of nesting. No host-language evaluation is used.
 

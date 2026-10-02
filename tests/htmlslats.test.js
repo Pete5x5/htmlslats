@@ -153,6 +153,20 @@ await check({ "index.html": '%%>for file x in folder(docs)>>$$x;%%', "docs/a.md"
 await check({ "index.html": '%%>for file x of type(.md) in folder(docs)>>[[$$x]]%%', "docs/a.md": "[[/index.html]]" }, /circular slat reference/);
 await check({ "index.html": '[[/docs/a.md]]', "docs/a.md": "raw markdown" }, "raw markdown");
 
+// Explicit enclosing assignments accumulate without changing local assignment rules.
+await check({ "index.html": '||x="models"||||modelCount=0||%%>for col y in row($$x) in file(models.csv) in range(1,end)>>||modelCount:=$$modelCount+1||$$modelCount;%%$$modelCount', "vars/models.csv": "models,a,b,c" }, "1;2;3;3");
+await check({ "index.html": '||n=0||%%>for number x in range(0,2)>>for number y in range(0,2)>>>||n:=calc(n+1)||%%$$n' }, "4");
+await check({ "index.html": '||n=0||%%>for number x in range(0,2)>>||n=n+1||$$n%%$$n' }, "110");
+await check({ "index.html": '||n=0||[[child.html]]$$n', "slats/child.html": '||n:=n+1||' }, "1");
+await check({ "index.html": '||n=0||[[child.html//n=10]]$$n', "slats/child.html": '||n:=n+1||$$n' }, "110");
+await check({ "index.html": '||n=0||%%>for number x in range(0,0)>>||n:=n+1||%%$$n' }, "0");
+await check({ "index.html": '||n=0||[]IGNORE[]||n:=n+1||[]/IGNORE[]$$n' }, "||n:=n+1||0");
+await check({ "index.html": '||n:=1||' }, /no enclosing variable.*n.*index.html/);
+await check({ "index.html": '||n=0||||n:=1||' }, /no enclosing variable/);
+await check({ "index.html": '||n=0||[[$$x in child.html]]$$n', "slats/child.html": '||n:=n+1||||x=2||' }, "20");
+await check({ "index.html": '||n=0||[[$$n in child.html]]', "slats/child.html": '||n:=n+1||' }, /does not exist/);
+await check({ "index.html": '||n="0"||%%>for number x in range(0,1)>>||n:=n+1||%%' }, /integer/);
+
 const csv = 'tagline,"hello, world",two,,four\ntagline,second\n123,numeric key';
 await check({ "index.html": '%%>for col x in row(tagline) in file(vars.csv)>>[$$x]%%', "vars/vars.csv": csv }, "[hello, world][two][][four]");
 await check({ "index.html": '%%>for col x in row(0) in file(vars.csv) in range(1,3)>>[$$x]%%', "vars/vars.csv": csv }, "[hello, world][two]");

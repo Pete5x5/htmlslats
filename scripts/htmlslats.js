@@ -175,7 +175,7 @@ async function render(input, context, sourcePath) {
 async function renderText(input, context, sourcePath) {
   let output = "";
   let cursor = 0;
-  const tokens = /\[\[|\{\{|%%(?=\s*>*for\b)|\|\|(?=[A-Za-z_][A-Za-z0-9_-]*\s*=)/g;
+  const tokens = /\[\[|\{\{|%%(?=\s*>*for\b)|\|\|(?=[A-Za-z_][A-Za-z0-9_-]*\s*(?::=|=))/g;
   while (cursor < input.length) {
     tokens.lastIndex = cursor;
     const match = tokens.exec(input);
@@ -215,10 +215,22 @@ async function renderText(input, context, sourcePath) {
 }
 
 async function defineLocal(expression, context, sourcePath) {
-  const assignment = expression.match(new RegExp(`^(${VARIABLE_NAME})\\s*=\\s*([\\s\\S]*)$`));
+  const assignment = expression.match(new RegExp(`^(${VARIABLE_NAME})\\s*(:=|=)\\s*([\\s\\S]*)$`));
   if (!assignment) fail(`invalid local variable declaration "${expression}"`, sourcePath);
-  const value = await evaluateDeclaration(assignment[2], context, sourcePath);
-  context.scopedVarsStack.at(-1).set(assignment[1], value);
+  const [, name, operator, expressionValue] = assignment;
+  let target = context.scopedVarsStack.at(-1);
+  if (operator === ":=") {
+    target = undefined;
+    for (let i = context.scopedVarsStack.length - 2; i >= 0; i--) {
+      if (context.scopedVarsStack[i].has(name)) {
+        target = context.scopedVarsStack[i];
+        break;
+      }
+    }
+    if (!target) fail(`no enclosing variable "$$${name}" to update`, sourcePath);
+  }
+  const value = await evaluateDeclaration(expressionValue, context, sourcePath);
+  target.set(name, value);
 }
 
 // Values retain their type until inserted into output. Never evaluate host code.
@@ -554,7 +566,7 @@ async function extractLocal(name, slatName, context, sourcePath) {
   try {
     const { text } = extractIgnoredSections(await fs.readFile(slatPath, "utf8"));
     // Visit direct declarations only; includes and loop bodies are never evaluated.
-    const tokens = /\[\[|\{\{|%%(?=\s*>*for\b)|\|\|(?=[A-Za-z_][A-Za-z0-9_-]*\s*=)/g;
+    const tokens = /\[\[|\{\{|%%(?=\s*>*for\b)|\|\|(?=[A-Za-z_][A-Za-z0-9_-]*\s*(?::=|=))/g;
     let match;
     while ((match = tokens.exec(text))) {
       const opener = match[0];
@@ -565,7 +577,14 @@ async function extractLocal(name, slatName, context, sourcePath) {
       const close = opener === "[[" ? "]]" : opener === "{{" ? "}}" : "||";
       const end = text.indexOf(close, match.index + 2);
       if (end < 0) fail(`unclosed command in ${slatName}`, sourcePath);
-      if (opener === "||") await defineLocal(text.slice(match.index + 2, end).trim(), context, slatPath);
+      if (opener === "||") {
+        const declaration = text.slice(match.index + 2, end).trim();
+        // Parent updates are commands, not direct local declarations. Extraction
+        // must never mutate the caller's variables.
+        if (!new RegExp(`^${VARIABLE_NAME}\\s*:=`).test(declaration)) {
+          await defineLocal(declaration, context, slatPath);
+        }
+      }
       tokens.lastIndex = end + 2;
     }
     if (!locals.has(name)) fail(`local variable "$$${name}" does not exist in ${path.relative(ROOT, slatPath)}`, sourcePath);

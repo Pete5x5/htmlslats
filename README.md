@@ -66,6 +66,8 @@ Use double curly braces to insert values from `vars/`.
 
 Lookup the first row whose first column matches a value, then choose a column number starting at `0`:
 
+Lookup errors identify the source page or slat containing the lookup, using its project-relative path. Missing variable files and missing row keys also report the referencing source file.
+
 ```html
 {{site.csv//Tagline//1}}
 ```

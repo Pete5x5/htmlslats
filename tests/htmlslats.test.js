@@ -92,6 +92,30 @@ async function check(files, expected, { page = "index.html", setup } = {}) {
   }
 }
 
+// Lookup failures identify the source template, including nested slats.
+await check({
+  "index.html": "[[outer.html]]",
+  "slats/outer.html": "[[specs.html]]",
+  "slats/specs.html": "{{sony-tv-specs.csv//json//tvSpecs}}",
+  "vars/sony-tv-specs.csv": "json,value"
+}, /lookup "\{\{sony-tv-specs\.csv\/\/json\/\/tvSpecs\}\}" must include a numeric column, like \{\{sony-tv-specs\.csv\/\/json\/\/0\}\} in slats\/specs\.html/);
+
+await check({
+  "index.html": "{{site.csv//Name}}",
+  "vars/site.csv": "Name,value"
+}, /must include a numeric column.* in index\.html/);
+
+await check({
+  "index.html": "[[specs.html]]",
+  "slats/specs.html": "{{site.csv//Missing//1}}",
+  "vars/site.csv": "Name,value"
+}, /no row starts with "Missing" in vars\/site\.csv in slats\/specs\.html/);
+
+await check({
+  "index.html": "[[specs.html]]",
+  "slats/specs.html": "{{missing.csv//Name//1}}"
+}, /missing vars file "missing\.csv" in slats\/specs\.html/);
+
 await check({
   "index.html": '||x=123||$$x||x="hello world"||$$x[[child.html//x="scoped"]]$$x[[child.html]]$$x',
   "slats/child.html": '$$x||x="child"||$$x[[nested.html]]',

@@ -503,7 +503,7 @@ async function loopValues(header, context, sourcePath) {
   const file = parseValue(match[2], sourcePath);
   assertSafeRelativePath(file, "vars file");
   if (path.extname(file).toLowerCase() !== ".csv") fail("column loops require a .csv vars file", sourcePath);
-  const table = await loadVars(file, context);
+  const table = await loadVars(file, context, sourcePath);
   const lookup = match[1].trim();
   const row = /^\d+$/.test(lookup) ? table[Number(lookup)] : table.find((cells) => cells[0] === parseValue(lookup, sourcePath));
   if (!row) fail(`no CSV row ${lookup} in vars/${file}`, sourcePath);
@@ -721,7 +721,7 @@ async function resolveVar(expression, context, sourcePath) {
 
   const [fileName, lookup, column] = parts;
   assertSafeRelativePath(fileName, "vars file");
-  const table = await loadVars(fileName, context);
+  const table = await loadVars(fileName, context, sourcePath);
 
   if (/^\[\d+,\d+\]$/.test(lookup)) {
     const [x, y] = lookup.slice(1, -1).split(",").map(Number);
@@ -729,20 +729,20 @@ async function resolveVar(expression, context, sourcePath) {
   }
 
   if (parts.length !== 3 || !/^\d+$/.test(column)) {
-    throw new Error(`htmlslats: lookup "{{${expression}}}" must include a numeric column, like {{${fileName}//${lookup}//0}}`);
+    fail(`lookup "{{${expression}}}" must include a numeric column, like {{${fileName}//${lookup}//0}}`, sourcePath);
   }
 
   const columnIndex = Number(column);
   const row = table.find((cells) => cells[0] === lookup);
 
   if (!row) {
-    throw new Error(`htmlslats: no row starts with "${lookup}" in vars/${fileName}`);
+    fail(`no row starts with "${lookup}" in vars/${fileName}`, sourcePath);
   }
 
   return row[columnIndex] ?? "";
 }
 
-async function loadVars(fileName, context) {
+async function loadVars(fileName, context, sourcePath) {
   if (context.varsCache.has(fileName)) {
     return context.varsCache.get(fileName);
   }
@@ -750,7 +750,7 @@ async function loadVars(fileName, context) {
   const varsPath = path.join(ROOT, VARS_DIR, fileName);
 
   if (!(await exists(varsPath))) {
-    throw new Error(`htmlslats: missing vars file "${fileName}"`);
+    fail(`missing vars file "${fileName}"`, sourcePath);
   }
 
   await assertProjectPath(varsPath, varsPath);

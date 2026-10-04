@@ -85,7 +85,12 @@ async function check(files, expected, { page = "index.html", setup } = {}) {
       assert.match(result.stderr, expected);
     } else {
       assert.equal(result.status, 0, result.stderr);
-      assert.equal(await fs.readFile(path.join(root, "dist", page), "utf8"), expected);
+      const outputs = typeof expected === "string" ? { [page]: expected } : expected;
+      for (const [relative, content] of Object.entries(outputs)) {
+        const actual = await fs.readFile(path.join(root, "dist", relative), "utf8");
+        if (content instanceof RegExp) assert.match(actual, content);
+        else assert.equal(actual, content);
+      }
     }
   } finally {
     await fs.rm(root, { recursive: true, force: true });
@@ -140,18 +145,83 @@ await check({
   "docs/index.html": '[[docs-content.html//x="/docs"]]',
   "slats/docs-content.html": '%%>for file x of type(.md) in folder($$x)>>$$x:[[$$x]];%%',
   "docs/b.md": "B", "docs/a.md": "A", "docs/skip.txt": "skip", "docs/nested/c.md": "nested"
-}, "a.md:A;b.md:B;", { page: "docs/index.html" });
+}, "a.md:<p>A</p>\n;b.md:<p>B</p>\n;", { page: "docs/index.html" });
 await check({
   "docs/index.html": '%%>for file x>>$$x:[[$$x]];%%',
   "docs/b.txt": "B", "docs/a.md": "A"
-}, "a.md:A;b.txt:B;", { page: "docs/index.html" });
+}, "a.md:<p>A</p>\n;b.txt:B;", { page: "docs/index.html" });
 await check({
   "index.html": "[[list.html]]",
   "slats/list.html": '%%>for file x>>[[$$x]]%%', "slats/a.txt": "A"
 }, "A");
 await check({ "index.html": '%%>for file x in folder(docs)>>$$x;%%', "docs/a.md": "A", "docs/b.txt": "B" }, "a.md;b.txt;");
 await check({ "index.html": '%%>for file x of type(.md) in folder(docs)>>[[$$x]]%%', "docs/a.md": "[[/index.html]]" }, /circular slat reference/);
-await check({ "index.html": '[[/docs/a.md]]', "docs/a.md": "raw markdown" }, "raw markdown");
+await check({ "index.html": '[[/docs/a.md]]', "docs/a.md": "raw markdown" }, "<p>raw markdown</p>\n");
+
+// Markdown includes format prose while code examples and raw includes stay literal.
+await check({
+  "index.html": '[[/docs/a.md//label="Welcome"]]',
+  "docs/a.md": '# $$label\n\n**Bold** and *italic* with [a link](/about.html).\n\n- One\n- Two\n\n> Quote\n\n```html\n[[missing.html]] $$label ||x=1||\n```\n\n`{{missing.csv//x//1}}`\n',
+}, '<h1>Welcome</h1>\n<p><strong>Bold</strong> and <em>italic</em> with <a href="/about.html">a link</a>.</p>\n<ul>\n<li>One</li>\n<li>Two</li>\n</ul>\n<blockquote>\n<p>Quote</p>\n</blockquote>\n<pre><code class="language-html">[[missing.html]] $$label ||x=1||\n</code></pre>\n<p><code>{{missing.csv//x//1}}</code></p>\n');
+await check({ "index.html": '[[raw /docs/a.md]]', "docs/a.md": '# $$title\n[[missing.html]]' }, '# $$title\n[[missing.html]]');
+await check({ "index.html": '[[/docs/a.MARKDOWN]]', "docs/a.MARKDOWN": '# Title\n\n[]IGNORE[]$$x [[missing.html]][]/IGNORE[]' }, '<h1>Title</h1>\n<p>$$x [[missing.html]]</p>\n');
+await check({ "index.html": '[[/docs/a.md]]', "docs/a.md": '||title="Docs"||# $$title\n\n[[note.md]]', "slats/note.md": '**Nested**' }, '<h1>Docs</h1>\n<p><strong>Nested</strong></p>\n');
+await check({ "index.html": '[[/docs/a.md]]', "docs/a.md": '| Name | Value |\n| --- | --- |\n| A | **B** |' }, { "index.html": /<table>[\s\S]*<th>Name<\/th>[\s\S]*<td><strong>B<\/strong><\/td>/ });
+await check({ "index.html": '[[$$title in /docs/a.md]]', "docs/a.md": '`||title="example"||`\n\n||title="Actual"||\n\n```\n||title="example"||\n```' }, 'Actual');
+await check({ "index.html": '[[$$title in /docs/a.md]]', "docs/a.md": '||title="`Docs`"||' }, '`Docs`');
+await check({ "index.html": '[[/docs/a.md]]', "docs/a.md": '```\n[]IGNORE[]\n```\n\n`[]/IGNORE[]`' }, '<pre><code>[]IGNORE[]\n</code></pre>\n<p><code>[]/IGNORE[]</code></p>\n');
+await check({ "index.html": '[[/docs/a.md]]', "docs/a.md": '> ```\n> [[missing.html]] $$x\n> ```\n\n    {{missing.csv//x//1}}\n\n- Use `[[missing.html]]`\n' }, {
+  "index.html": /<blockquote>\n<pre><code>\[\[missing.html\]\] \$\$x\n<\/code><\/pre>\n<\/blockquote>\n<pre><code>\{\{missing.csv\/\/x\/\/1\}\}\n<\/code><\/pre>\n<ul>\n<li>Use <code>\[\[missing.html\]\]<\/code><\/li>/
+});
+await check({ "index.html": '[[/docs/a.md]]', "docs/a.md": '# CRLF\r\n\r\n```\r\n[[missing.html]]\r\n```' }, '<h1>CRLF</h1>\n<pre><code>[[missing.html]]\n</code></pre>\n');
+await check({ "index.html": '[[/docs/a.md]]', "docs/a.md": '[]IGNORE[]\n```\n[[missing.html]]\n[]/IGNORE[]' }, '<pre><code>[[missing.html]]\n</code></pre>\n');
+await check({ "index.html": '%%>for number n in range(0,9999)>>%%[[page /docs/a.md]]', "docs/a.md": '%%>for number n in range(0,9999)>>%%# A' }, {
+  "index.html": '/docs/a.html', "docs/a.html": /<h1>A<\/h1>/
+});
+await check({ "index.html": '%%>for number n in range(0,9999)>>%%[[page /docs/a.md]]%%>for number n in range(0,0)>>%%', "docs/a.md": '# A' }, /loop iteration limit.*index.html/);
+
+// Page generation returns URLs to build an index, including nested slat bindings.
+await check({
+  "docs/index.html": '<ul>%%>for file doc of type(.md) in folder(/docs)>>[[link.html]]%%</ul>',
+  "slats/link.html": '<li><a href="[[page $$doc//layout="doc-page.html"]]">$$doc</a></li>',
+  "slats/doc-page.html": '<title>$$page-title</title>[[header.html]]<main>$$page-content</main><p>$$page-file:$$page-url</p>',
+  "slats/header.html": '<header>Docs</header>',
+  "docs/a.md": '# A\n\n**First**', "docs/b.md": '# B'
+}, {
+  "docs/index.html": '<ul><li><a href="/docs/a.html">a.md</a></li><li><a href="/docs/b.html">b.md</a></li></ul>',
+  "docs/a.html": '<title>a</title><header>Docs</header><main><h1>A</h1>\n<p><strong>First</strong></p>\n</main><p>a.md:/docs/a.html</p>',
+  "docs/b.html": '<title>b</title><header>Docs</header><main><h1>B</h1>\n</main><p>b.md:/docs/b.html</p>'
+});
+await check({ "index.html": '[[page /docs/a.md]]', "docs/a.md": '# A' }, {
+  "index.html": '/docs/a.html', "docs/a.html": /^<!doctype html>[\s\S]*<title>a<\/title>[\s\S]*<main>\n<h1>A<\/h1>\n<\/main>/
+});
+await check({
+  "index.html": '||counter=0||[[page /docs/a.markdown//output="help/My guide.html"//layout="layout.html"//title="A & B"//label="Hi"]]:$$counter',
+  "slats/layout.html": '<title>$$page-title</title><main>$$page-content</main>',
+  "docs/a.markdown": '||counter:=counter+1||# $$label\n\nCount: $$counter'
+}, {
+  "index.html": '/help/My%20guide.html:0',
+  "help/My guide.html": '<title>A &amp; B</title><main><h1>Hi</h1>\n<p>Count: 1</p>\n</main>'
+});
+await check({ "index.html": '[]IGNORE[][[page /docs/missing.md]][]/IGNORE[]' }, '[[page /docs/missing.md]]');
+await check({ "index.html": '[[page /docs/a.md]][[page /docs/a.md]]', "docs/a.md": '# A' }, /page output "docs\/a.html" already exists.*index.html/);
+await check({ "index.html": '[[page /docs/a.md]]', "docs/a.md": '# A', "docs/a.html": 'Existing' }, /page output "docs\/a.html" already exists.*reserved by docs\/a.html/);
+await check({ "index.html": '[[page /docs/a.md]]', "docs/a.md": '# A', "src/docs/a.html": 'Asset' }, /page output "docs\/a.html" already exists.*src\/docs\/a.html/);
+await check({ "index.html": '[[page /docs/a.md//output="docs.html/a.html"]]', "docs/a.md": '# A', "src/docs.html": 'Asset' }, /page output.*conflicts with "docs.html"/);
+await check({ "index.html": '[[page /docs/a.md//output="../escape.html"]]', "docs/a.md": '# A' }, /invalid page output path.*index.html/);
+await check({ "index.html": '[[page /docs/a.md//output="/dist/../../escape.html"]]', "docs/a.md": '# A' }, /invalid page output path/);
+await check({ "index.html": '[[page /docs/a.md//output="guide.md"]]', "docs/a.md": '# A' }, /invalid page output path/);
+await check({ "index.html": '[[page /docs/a.md//layout="missing.html"]]', "docs/a.md": '# A' }, /missing slat.*missing.html.*index.html/);
+await check({ "index.html": '[[page /docs/missing.md]]' }, /missing slat.*missing.md.*index.html/);
+await check({ "index.html": '[[page /docs/a.txt]]', "docs/a.txt": 'A' }, /page sources must be .md or .markdown/);
+await check({ "index.html": '[[page /docs/a.md]]', "docs/a.md": '[[/index.html]]' }, /circular slat reference/);
+await check({ "index.html": '[[page /docs/a.md]]', "docs/a.md": '[[page /docs/b.md]]', "docs/b.md": '[[page /docs/a.md]]' }, /page output.*already exists/);
+await check({ "index.html": '[[page /docs/a.md]]', "docs/a.md": '# A' }, /symlink path cannot leave the project/, {
+  setup: async (root) => {
+    await fs.rm(path.join(root, "docs/a.md"));
+    await fs.symlink(path.join(repoRoot, "README.md"), path.join(root, "docs/a.md"));
+  }
+});
 
 // Both endpoints are included for number and CSV ranges.
 await check({ "index.html": '%%>for number z in range(1,7)>>$$z;%%' }, "1;2;3;4;5;6;7;");
@@ -235,12 +305,12 @@ await check(includeChain, /include depth exceeds 64/);
 await check({
   "index.html": '%%>for file doc of type(.md) in folder(/docs)>>[[doc-card.html//filename=$$doc]]%%',
   "slats/doc-card.html": '<article>$$filename:[[$$filename]]</article>', "docs/a.md": "A", "docs/b.md": "B"
-}, '<article>a.md:A</article><article>b.md:B</article>');
+}, '<article>a.md:<p>A</p>\n</article><article>b.md:<p>B</p>\n</article>');
 await check({ "index.html": '%%>for number n in range(0,1)>>[]IGNORE[]>>$$n[]/IGNORE[]%%' }, '>>$$n>>$$n');
 await check({ "index.html": '{{>for number x in range(0,1)>>{{>for number y in range(0,1)>>$$x,$$y;}}}}' }, '0,0;0,1;1,0;1,1;');
 await check({ "index.html": '%%>for number x in range(0,1)>>%%>for number y in range(0,1)>>$$x,$$y;%%%%' }, '0,0;0,1;1,0;1,1;');
 await check({ "index.html": '||x="50%%"||$$x' }, '50%%');
-await check({ "index.html": '%%>for file x of type(.md)>>[[$$x]]%%', "a.md": "A" }, 'A');
+await check({ "index.html": '%%>for file x of type(.md)>>[[$$x]]%%', "a.md": "A" }, '<p>A</p>\n');
 await check({ "index.html": '%%>for file x in folder(empty)>>unused%%' }, '', { setup: (root) => fs.mkdir(path.join(root, "empty")) });
 await check({ "index.html": '%%>for number n in range(0,9999)>>%%', "second.html": '%%>for number n in range(0,9999)>>%%' }, '');
 await check({ "index.html": '%%>for number n in range(0,1)>>for number n in range(2,3)>>>$$n>>$$n%%' }, '230231');

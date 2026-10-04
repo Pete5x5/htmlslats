@@ -20,5 +20,8 @@
     "html",
     "ssg"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "marked": "^15.0.12"
+  }
 }

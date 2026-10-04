@@ -11,6 +11,7 @@ Write pages as regular `.html` files, place reusable chunks in `slats/`, keep si
 ## Quick Start
 
 ```sh
+npm install
 npm run build
 ```
 
@@ -59,6 +60,82 @@ Multiple scoped variables are supported:
 ```html
 [[product.html//x="s30"//label="Small product"]]
 ```
+
+## Markdown
+
+Include a `.md` or `.markdown` file to render it as HTML:
+
+```html
+<main>[[/docs/intro.md]]</main>
+```
+
+Markdown supports headings, paragraphs, emphasis, links, images, lists, blockquotes, fenced code, and GitHub-style tables and task lists. Raw HTML is preserved. Extension detection for Markdown rendering is case insensitive; file-loop type filters remain case sensitive.
+
+Variables, declarations, includes, and loops work in Markdown prose and run before formatting. Inline code, fenced code blocks, and indented code blocks keep htmlslats commands literal, making documentation examples easy to write. Ignore blocks keep commands literal too, while their content still receives Markdown formatting. Local extraction skips declarations in Markdown code examples.
+
+For completely unchanged file contents, use `[[raw /docs/intro.md]]`. This skips both command expansion and Markdown formatting. Other file types continue to render as text with command expansion.
+
+Markdown files are only output as standalone pages when explicitly requested with a page command; they are not automatically discovered as pages.
+
+### Create Pages from Markdown
+
+`[[page /docs/intro.md]]` creates `dist/docs/intro.html` and inserts `/docs/intro.html` into the current page. With no layout, the generated page is a complete HTML document with a title, viewport metadata, and a `<main>` containing the rendered Markdown.
+
+Use a file loop to generate pages and their index links together. For example, put this in `docs/index.html`:
+
+```html
+[[header.html]]
+<main>
+  <h1>Documentation</h1>
+  <ul>
+    %%>for file doc of type(.md) in folder(/docs)
+    >> <li><a href="[[page $$doc//layout="doc-page.html"]]">$$doc</a></li>
+    %%
+  </ul>
+</main>
+[[footer.html]]
+```
+
+Create `slats/doc-page.html` as the shared layout:
+
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>$$page-title</title>
+    <link rel="stylesheet" href="/css/site.css">
+  </head>
+  <body>
+    [[header.html]]
+    <main>$$page-content</main>
+    [[footer.html]]
+  </body>
+</html>
+```
+
+Each selected file gets its own page: `docs/intro.md` becomes `dist/docs/intro.html`, and `docs/setup.md` becomes `dist/docs/setup.html`. The loop inserts links into the index instead of appending those documents to it. A page command also works in nested slats; selected file bindings remain available.
+
+Page commands support these scoped options:
+
+| Option | Meaning |
+| --- | --- |
+| `layout` | Layout slat; resolves like an ordinary include, including `/` project paths. Omit for the default document. |
+| `output` | Output `.html` path relative to `dist/`, with an optional leading `/`. Defaults to the source path with its Markdown extension replaced by `.html`. |
+| `title` | Page title; defaults to the source filename without its extension. |
+
+For example:
+
+```html
+<a href="[[page /docs/intro.md//layout="doc-page.html"//output="help/start.html"//title="Getting started"]]">Start here</a>
+```
+
+The command returns `/help/start.html`. URLs encode spaces and other special filename characters. Relative links and images in Markdown stay as authored; link to generated `.html` pages and use root-relative assets when changing output folders.
+
+The Markdown source and layout receive `$$page-title` (HTML-escaped title), `$$page-url` (root-relative URL), and `$$page-file` (source basename including its extension). The layout also receives `$$page-content` (rendered HTML). Other scoped arguments and copies of the caller's variables are available to both. Source-local declarations stay local to the Markdown source. Changes using `:=` inside generated pages do not alter the caller's variables.
+
+Generate each output path once per build. Duplicate outputs, conflicts with existing HTML pages or static assets, paths outside `dist/`, missing sources/layouts, and include cycles raise build errors. Generated pages each have their own loop iteration budget, and a build can generate at most 10,000 pages. The usual include-depth limit also applies to page generation. Rebuilding cleans `dist/`, so deleting a Markdown source removes its generated page on the next build.
 
 ## Global Variables
 
@@ -288,7 +365,7 @@ Then create `slats/docs-content.html`:
 %%
 ```
 
-Add content files such as `docs/intro.md` and `docs/setup.md`. The folder expression reads the scoped `$$x` before the loop uses `x` for each filename. Slat insertion preserves file text; `.md` files are **not converted to HTML**. Use HTML content if you need rendered markup, or handle Markdown separately.
+Add content files such as `docs/intro.md` and `docs/setup.md`. The folder expression reads the scoped `$$x` before the loop uses `x` for each filename. Markdown files are converted to HTML when included. Use `[[raw $$x]]` if you need literal file text instead.
 
 To apply a shared slat to every item, pass the selected filename to it:
 
@@ -307,7 +384,7 @@ With `slats/doc-card.html` containing:
 </article>
 ```
 
-The selected file remains available to includes inside that slat. File loops assemble content in the current page; they do not generate a separate output page for each item.
+The selected file remains available to includes inside that slat. Ordinary includes assemble content in the current page. Use `[[page $$doc]]` instead to generate a separate page and insert its URL; see [Create Pages from Markdown](#create-pages-from-markdown).
 
 ### Loop Through Numbers
 

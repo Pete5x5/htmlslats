@@ -3,6 +3,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { marked } from "marked";
 
 const ROOT = process.cwd();
 const DIST_DIR = "dist";
@@ -58,12 +59,14 @@ async function build() {
     fileBindingsStack: [],
     extractionStack: [],
     loopDepth: 0,
-    iterations: 0
+    iterations: 0,
+    outputs: new Map(),
+    generatedPages: 0
   };
 
   await clean();
   await ensureDefaultFolders();
-  await copySrcAssets();
+  await copySrcAssets(context);
   await buildHtmlPages(context);
   console.log("htmlslats: built dist/");
 }
@@ -81,14 +84,14 @@ async function ensureDefaultFolders() {
   ]);
 }
 
-async function copySrcAssets() {
+async function copySrcAssets(context) {
   const source = path.join(ROOT, SRC_DIR);
   const target = path.join(ROOT, DIST_DIR);
   if (!(await exists(source))) return;
-  await copyDirectoryContents(source, target);
+  await copyDirectoryContents(source, target, context);
 }
 
-async function copyDirectoryContents(source, target) {
+async function copyDirectoryContents(source, target, context) {
   await fs.mkdir(target, { recursive: true });
   const entries = await fs.readdir(source, { withFileTypes: true });
 
@@ -97,19 +100,27 @@ async function copyDirectoryContents(source, target) {
     const targetPath = path.join(target, entry.name);
 
     if (entry.isDirectory()) {
-      await copyDirectoryContents(sourcePath, targetPath);
+      await copyDirectoryContents(sourcePath, targetPath, context);
       continue;
     }
 
     if (entry.isFile()) {
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.copyFile(sourcePath, targetPath);
+      context.outputs.set(path.relative(path.join(ROOT, DIST_DIR), targetPath), sourcePath);
     }
   }
 }
 
 async function buildHtmlPages(context) {
   const pages = await findHtmlPages(ROOT);
+  // Reserve every source page before rendering: generated pages cannot overwrite
+  // a page that happens to be built later, or an asset already copied to dist.
+  for (const page of pages) {
+    const relative = path.relative(ROOT, page);
+    if (context.outputs.has(relative)) fail(`page output "${relative}" conflicts with a static asset`, page);
+    context.outputs.set(relative, page);
+  }
 
   if (pages.length === 0) {
     console.warn("htmlslats: no .html pages found. Add index.html at the project root.");
@@ -162,13 +173,73 @@ function fail(message, sourcePath) {
 }
 
 async function render(input, context, sourcePath) {
-  const { text, ignored } = extractIgnoredSections(input);
+  const markdown = isMarkdown(sourcePath);
+  const { text: protectedText, code } = protectMarkdownCode(input, markdown);
+  const { text, ignored } = extractIgnoredSections(protectedText);
   context.scopedVarsStack.push(new Map());
   try {
-    return restoreIgnoredSections(await renderText(text, context, sourcePath), ignored);
+    let rendered = restoreIgnoredSections(await renderText(text, context, sourcePath), ignored);
+    rendered = restoreMarkdownCode(rendered, code);
+    return markdown ? marked.parse(rendered, { async: false, gfm: true }) : rendered;
   } finally {
     context.scopedVarsStack.pop();
   }
+}
+
+function protectMarkdownCode(text, markdown) {
+  const code = [];
+  if (!markdown) return { text, code };
+  text = normalizeLineEndings(text);
+  const ranges = [];
+  let offset = 0;
+  // Marked removes quote/list prefixes from nested code tokens. Locate those
+  // tokens inside their original top-level block, allowing the stripped prefixes
+  // between lines, and retain the exact source for restoration.
+  for (const block of marked.lexer(text)) {
+    const start = text.indexOf(block.raw, offset);
+    if (start < 0) continue;
+    offset = start + block.raw.length;
+    let localOffset = 0;
+    marked.walkTokens([block], (token) => {
+      if (token.type !== "code" && token.type !== "codespan") return;
+      const pattern = token.raw.split("\n").map((line) => line.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join("\\n[\\t ]*(?:>[\\t ]*)*");
+      const match = new RegExp(pattern, "g");
+      match.lastIndex = localOffset;
+      const found = match.exec(block.raw);
+      if (!found) return;
+      ranges.push({ start: start + found.index, end: start + match.lastIndex });
+      localOffset = match.lastIndex;
+    });
+  }
+  let output = "";
+  let cursor = 0;
+  for (const range of ranges) {
+    if (range.start < cursor) continue;
+    // Whichever region opens first wins: a code example may show ignore markers,
+    // while an ignored region may contain arbitrary (even unclosed) code fences.
+    let ignoreStart = text.indexOf("[]IGNORE[]", cursor);
+    while (ignoreStart >= 0 && ignoreStart < range.start) {
+      if (ignoreStart > 0 && text[ignoreStart - 1] === "/") {
+        ignoreStart = text.indexOf("[]IGNORE[]", ignoreStart + 10);
+        continue;
+      }
+      const end = findUnescapedEndIgnore(text, ignoreStart + 10);
+      if (end < 0) break; // extractIgnoredSections will report the missing closer.
+      output += text.slice(cursor, end + 11);
+      cursor = end + 11;
+      ignoreStart = text.indexOf("[]IGNORE[]", cursor);
+    }
+    if (range.start < cursor) continue;
+    output += text.slice(cursor, range.start) + `\u0000HTMLSLATS_CODE_${code.length}\u0000`;
+    code.push(text.slice(range.start, range.end));
+    cursor = range.end;
+  }
+  return { text: output + text.slice(cursor), code };
+}
+
+function restoreMarkdownCode(text, code) {
+  return text.replace(/\u0000HTMLSLATS_CODE_(\d+)\u0000/g, (token, index) => code[index] ?? token);
 }
 
 // Interpret commands in source order so declarations and loop scopes are predictable.
@@ -201,7 +272,11 @@ async function renderText(input, context, sourcePath) {
       await defineLocal(expression, context, sourcePath);
     } else if (opener === "[[") {
       const extraction = expression.match(new RegExp(`^\\$\\$(${VARIABLE_NAME})\\s+in\\s+(.+)$`));
-      if (extraction) {
+      if (/^page\s/.test(expression)) {
+        output += await createPage(await parseSlatReference(expression.slice(5).trim(), sourcePath, context), context, sourcePath);
+      } else if (/^raw\s/.test(expression)) {
+        output += await loadSlat(await parseSlatReference(expression.slice(4).trim(), sourcePath, context), context, sourcePath, true);
+      } else if (extraction) {
         output += await extractLocal(extraction[1], replaceScopedVars(extraction[2], context), context, sourcePath);
       } else {
         output += await loadSlat(await parseSlatReference(expression, sourcePath, context), context, sourcePath);
@@ -564,7 +639,8 @@ async function extractLocal(name, slatName, context, sourcePath) {
   const locals = new Map();
   context.scopedVarsStack.push(locals);
   try {
-    const { text } = extractIgnoredSections(await fs.readFile(slatPath, "utf8"));
+    const protectedSource = protectMarkdownCode(await fs.readFile(slatPath, "utf8"), isMarkdown(slatPath));
+    const { text } = extractIgnoredSections(protectedSource.text);
     // Visit direct declarations only; includes and loop bodies are never evaluated.
     const tokens = /\[\[|\{\{|%%(?=\s*>*for\b)|\|\|(?=[A-Za-z_][A-Za-z0-9_-]*\s*(?::=|=))/g;
     let match;
@@ -588,7 +664,8 @@ async function extractLocal(name, slatName, context, sourcePath) {
       tokens.lastIndex = end + 2;
     }
     if (!locals.has(name)) fail(`local variable "$$${name}" does not exist in ${path.relative(ROOT, slatPath)}`, sourcePath);
-    return locals.get(name);
+    const value = locals.get(name);
+    return typeof value === "string" ? restoreMarkdownCode(value, protectedSource.code) : value;
   } finally {
     context.scopedVarsStack.pop();
     context.extractionStack.pop();
@@ -687,7 +764,7 @@ function unescapeScopedVarValue(value) {
   return value.replaceAll("\\\"", "\"").replaceAll("\\'", "'").replaceAll("\\\\", "\\");
 }
 
-async function loadSlat(reference, context, sourcePath) {
+async function loadSlat(reference, context, sourcePath, raw = false) {
   const { slatName, scopedVars } = reference;
   const slatPath = await resolveSlatPath(slatName, context, sourcePath);
 
@@ -707,11 +784,73 @@ async function loadSlat(reference, context, sourcePath) {
   context.scopedVarsStack.push(scopedVars);
   try {
     const source = await fs.readFile(slatPath, "utf8");
+    if (raw) return source;
     return await render(source, context, slatPath);
   } finally {
     context.scopedVarsStack.pop();
     context.slatStack.pop();
   }
+}
+
+function isMarkdown(file) {
+  return /\.(md|markdown)$/i.test(file);
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  })[char]);
+}
+
+// Page creation returns a URL so the same loop can build an index of links.
+async function createPage(reference, context, sourcePath) {
+  const file = await resolveSlatPath(reference.slatName, context, sourcePath);
+  if (!isMarkdown(file)) fail("page sources must be .md or .markdown files", sourcePath);
+  const { scopedVars } = reference;
+  const relativeSource = path.relative(ROOT, file);
+  const output = String(scopedVars.get("output") ?? relativeSource.replace(/\.(md|markdown)$/i, ".html"));
+  const relative = output.startsWith("/") ? output.slice(1) : output;
+  // Unlike source paths, output paths must be clean URL paths inside dist.
+  if (!relative || relative.includes("\\") || relative.split("/").some((part) => !part || part === "." || part === "..") ||
+      !relative.endsWith(".html") || /[\u0000-\u001f\u007f?#]/.test(relative)) {
+    fail(`invalid page output path "${output}"; use a project-relative .html path without traversal`, sourcePath);
+  }
+  const target = path.join(ROOT, DIST_DIR, relative);
+  const previous = context.outputs.get(relative);
+  if (previous || await exists(target)) fail(`page output "${relative}" already exists${previous ? ` (reserved by ${path.relative(ROOT, previous)})` : " (static asset)"}`, sourcePath);
+  for (const reserved of context.outputs.keys()) {
+    if (relative.startsWith(`${reserved}/`) || reserved.startsWith(`${relative}/`)) fail(`page output "${relative}" conflicts with "${reserved}"`, sourcePath);
+  }
+  if (++context.generatedPages > MAX_ITERATIONS) fail(`generated page limit of ${MAX_ITERATIONS} exceeded`, sourcePath);
+  context.outputs.set(relative, sourcePath);
+  const url = "/" + relative.split("/").map(encodeURIComponent).join("/");
+  const title = escapeHtml(scopedVars.get("title") ?? path.basename(file, path.extname(file)));
+  // Copy inherited scopes to keep := in a generated page from mutating its
+  // index. Keep the include chain for cycle detection; reset the page budget.
+  const pageContext = {
+    ...context,
+    scopedVarsStack: context.scopedVarsStack.map((frame) => new Map(frame)),
+    fileBindingsStack: [...context.fileBindingsStack],
+    slatStack: [...context.slatStack],
+    extractionStack: [],
+    iterations: 0,
+    loopDepth: 0
+  };
+  pageContext.scopedVarsStack.push(new Map([
+    ...scopedVars,
+    ["page-title", title], ["page-url", url], ["page-file", path.basename(file)]
+  ]));
+  const content = await loadSlat({ slatName: reference.slatName, scopedVars: new Map() }, pageContext, sourcePath);
+  pageContext.scopedVarsStack.at(-1).set("page-content", content);
+  const layout = scopedVars.get("layout");
+  const rendered = layout === undefined
+    ? `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${title}</title>\n</head>\n<body>\n<main>\n${content}</main>\n</body>\n</html>\n`
+    : await loadSlat({ slatName: String(layout), scopedVars: new Map() }, pageContext, sourcePath);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, rendered);
+  // Nested page creation shares the count with the caller as well as outputs.
+  context.generatedPages = pageContext.generatedPages;
+  return url;
 }
 
 function replaceScopedVars(input, context) {
